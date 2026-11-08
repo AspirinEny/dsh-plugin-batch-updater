@@ -29,7 +29,7 @@ window.__ModuleLoader__.load({
       "retryFailed": "重试失败的 {count} 个",
       "noticeUpdatable": "有 {count} 个插件可以更新。",
       "checkedAt": "上次检查 {time}",
-      "checkedCount": "共 {count} 个自装插件",
+      "checkedCount": "共 {count} 个自装插件，{enabled} 个启用",
       "neverChecked": "还没检查过",
       "allUpToDate": "已是最新版本。",
       "checkFailed": "检查失败：{message}",
@@ -51,6 +51,7 @@ window.__ModuleLoader__.load({
       "runProgress": "正在更新 {index}/{total}：{name}",
       "runFinished": "更新完成：{applied} 个成功，{failed} 个失败",
       "runCancelled": "更新已停止",
+      "needsBuildApproval": "安装失败：新版需要先批准 {count} 个构建脚本，去官方安装对话框批准一次后重试。",
       "restartHint": "其中 {count} 个需要重启 DeepSeek Harness 才会生效。",
       "retryHint": "没有其它可更新的插件了；上面失败的 {count} 个可以重试。",
       "statusDone": "已完成",
@@ -92,7 +93,7 @@ window.__ModuleLoader__.load({
       "retryFailed": "Retry {count} failed",
       "noticeUpdatable": "{count} plugins can be updated.",
       "checkedAt": "Checked {time}",
-      "checkedCount": "{count} installed plugins",
+      "checkedCount": "{count} installed plugins, {enabled} enabled",
       "neverChecked": "Not checked yet",
       "allUpToDate": "Everything is up to date.",
       "checkFailed": "Check failed: {message}",
@@ -114,6 +115,7 @@ window.__ModuleLoader__.load({
       "runProgress": "Updating {index}/{total}: {name}",
       "runFinished": "Finished: {applied} updated, {failed} failed",
       "runCancelled": "The run was stopped",
+      "needsBuildApproval": "Failed: the new version needs {count} build script(s) approved first. Approve them once in the official install dialog, then retry.",
       "restartHint": "{count} of them need a DeepSeek Harness restart to take effect.",
       "retryHint": "Nothing else can be updated; the {count} that failed above can be retried.",
       "statusDone": "Done",
@@ -323,6 +325,11 @@ window.__ModuleLoader__.load({
 .bu-btnPrimary:hover:not(:disabled) { filter: brightness(1.05); background: var(--dsw-alias-brand-primary); }
 .bu-btnGhost { border-color: transparent; background: transparent; color: var(--dsw-alias-label-secondary); }
 .bu-btnGhost:hover:not(:disabled) { background: var(--dsw-alias-bg-layer-2); }
+.bu-input { width: 84px; height: 28px; padding: 0 8px; border-radius: 8px; text-align: center;
+  border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary); font-family: inherit; font-size: 13px; }
+.bu-input:disabled { opacity: .45; }
+.bu-input:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 
 .bu-group { display: flex; flex-direction: column; gap: 8px; }
 .bu-groupTitle { font-size: 12px; font-weight: 500; color: var(--dsw-alias-label-secondary);
@@ -411,6 +418,7 @@ window.__ModuleLoader__.load({
       if (reason === 'target-is-not-a-bundle') return t('reasonNotBundle')
       if (reason === 'not-found') return t('reasonNotFound')
       if (reason === 'network') return t('reasonNetwork')
+      if (reason === 'unknown') return t('reasonLookupFailed')
       if (reason.startsWith('needs-newer-dsh')) return t('reasonNeedsDsh')
       if (reason.startsWith('version-lookup')) return t('reasonLookupFailed')
       return reason
@@ -586,7 +594,10 @@ window.__ModuleLoader__.load({
             ? fill(t('checkFailed'), { message: data.checkError })
             : checkedAt === ''
               ? t('neverChecked')
-              : `${fill(t('checkedAt'), { time: checkedAt })} · ${fill(t('checkedCount'), { count: data.checked ?? 0 })}`
+              : `${fill(t('checkedAt'), { time: checkedAt })} · ${fill(t('checkedCount'), {
+                  count: data.checked ?? 0,
+                  enabled: plugins.filter((row) => row.enabled).length,
+                })}`
 
       const intervalValue =
         intervalDraft !== null ? intervalDraft : String(data?.config?.intervalMinutes ?? 360)
@@ -677,8 +688,7 @@ window.__ModuleLoader__.load({
               h('span', { className: 'bu-note' }, t('intervalLabel')),
               h('input', {
                 type: 'number',
-                className: 'bu-btn bu-mono',
-                style: { width: '84px', textAlign: 'center' },
+                className: 'bu-input bu-mono',
                 min: 5,
                 max: 10080,
                 step: 1,
@@ -748,7 +758,10 @@ window.__ModuleLoader__.load({
         data?.stale === true ? h('div', { className: 'bu-note' }, t('stale')) : null,
 
         // A finished run keeps its result block on screen until dismissed.
-        run !== null && Array.isArray(run.results) && run.results.length > 0
+        run !== null &&
+        Array.isArray(run.results) &&
+        run.results.length > 0 &&
+        (running || snapshot.dismissedRunAt !== run.startedAt)
           ? h(
               'div',
               { className: 'bu-group' },
@@ -793,7 +806,24 @@ window.__ModuleLoader__.load({
                     )
                   : null,
               ),
-              running ? h('div', { className: 'bu-bar' }, h('div', { className: 'bu-barFill', style: { width: `${percent}%` } })) : null,
+              running
+                ? h(
+                    'div',
+                    {
+                      className: 'bu-bar',
+                      role: 'progressbar',
+                      'aria-valuemin': 0,
+                      'aria-valuemax': total,
+                      'aria-valuenow': doneCount,
+                      'aria-label': fill(t('runProgress'), {
+                        index: Math.min(total, doneCount + 1),
+                        total,
+                        name: run.current?.name ?? '',
+                      }),
+                    },
+                    h('div', { className: 'bu-barFill', style: { width: `${percent}%` } }),
+                  )
+                : null,
               needRestart > 0
                 ? h('div', { className: 'bu-note' }, fill(t('restartHint'), { count: needRestart }))
                 : null,
@@ -808,12 +838,18 @@ window.__ModuleLoader__.load({
                       'div',
                       { className: 'bu-rowMain' },
                       h('div', { className: 'bu-title' }, row.name),
-                      h('div', { className: 'bu-sub bu-mono' }, `${row.from} → ${row.to}`),
+                      h(
+                        'div',
+                        { className: 'bu-sub bu-mono' },
+                        Array.isArray(row.pendingBuilds) && row.pendingBuilds.length > 0
+                          ? fill(t('needsBuildApproval'), { count: row.pendingBuilds.length })
+                          : `${row.from} → ${row.to}`,
+                      ),
                     ),
                     h(
                       'div',
                       { className: 'bu-rowEnd' },
-                      row.outcome === 'failed' && row.code
+                      row.outcome === 'failed' && row.code && !Array.isArray(row.pendingBuilds)
                         ? h('span', { className: 'bu-sub' }, row.code)
                         : null,
                       h(OutcomeBadge, { outcome: row.outcome, t }),

@@ -419,6 +419,20 @@ assert.ok(
   'an empty list after a failure does not claim everything is current',
 )
 
+// "Dismiss" must actually dismiss: the run block is not permanent furniture.
+const dismissedRun = { ...finished, dismissedRunAt: finished.data.run.startedAt }
+const dismissedHtml = renderTab(dismissedRun)
+assert.equal(dismissedHtml.includes('更新完成'), false, 'a dismissed run leaves the page')
+assert.ok(dismissedHtml.includes('dsh-cost-meter'), 'the plugin list is still there')
+
+// A running batch is never hidden by an earlier dismissal.
+const runningAfterDismiss = {
+  ...running,
+  dismissedRunAt: running.data.run.startedAt,
+  data: { ...running.data, run: { ...running.data.run, startedAt: 1 } },
+}
+assert.ok(renderTab(runningAfterDismiss).includes('停止'), 'a live run stays visible')
+
 // Running state offers Stop and says what it is doing.
 const runningHtml = renderTab(running)
 assert.ok(runningHtml.includes('停止'), 'a running batch offers Stop')
@@ -502,6 +516,7 @@ const codes = [
   'version-lookup-refused',
   'not-found',
   'network',
+  'unknown',
 ]
 for (const code of codes) {
   const snapshot = { ...idle, data: { ...idle.data, plugins: [rowBlocked(`plugin-${code}`, '1.0.0', code)] } }

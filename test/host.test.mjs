@@ -660,6 +660,87 @@ test('a change the plugin did not start marks the list stale, not empty', async 
   ctx.disposeAll()
 })
 
+test('a target equal to the installed version is not treated as an update', async () => {
+  const ctx = harness([mine('a', '2.0.0')], {
+    a: { status: 'listed', installed: '2.0.0', registry: null, attempts: [], omitted: 0, versions: [versionRecord('2.0.0')] },
+  }).ctx
+  const state = await callRoute(ctx, { action: 'refresh' })
+  assert.equal(state.plugins[0].state, 'current', 'the version in place is not an update target')
+  assert.equal(state.updatable.length, 0)
+  ctx.disposeAll()
+})
+
+test('versions are read concurrently, not one at a time', async () => {
+  const names = ['a', 'b', 'c', 'd', 'e', 'f']
+  const bundles = names.map((name) => mine(name, '1.0.0'))
+  let inFlight = 0
+  let peak = 0
+  const versions = Object.fromEntries(names.map((name) => [name, listed([versionRecord('2.0.0')])]))
+  const manager = fakeManager(bundles, {})
+  manager.listVersions = async (name) => {
+    inFlight += 1
+    peak = Math.max(peak, inFlight)
+    await new Promise((resolve) => setTimeout(resolve, 6))
+    inFlight -= 1
+    return versions[name]
+  }
+  const ctx = fakeContext({
+    pluginManager: manager,
+    connection: {
+      fetch: {
+        register: (route) => {
+          ctx.setHandler(route.path, route.fetch)
+          return async () => {}
+        },
+      },
+    },
+  })
+  apply(ctx, { intervalMinutes: 360 })
+  await callRoute(ctx, { action: 'refresh' })
+  assert.ok(peak > 1, `expected concurrent lookups, saw a peak of ${peak}`)
+  assert.ok(peak <= 4, `expected at most 4 lookups at once, saw ${peak}`)
+  ctx.disposeAll()
+})
+
+test('skip in the config keeps a named plugin out of the batch', async () => {
+  const bundles = [mine('wanted', '1.0.0'), mine('pinned', '1.0.0')]
+  const versions = Object.fromEntries(bundles.map((x) => [x.name, listed([versionRecord('2.0.0')])]))
+  const { ctx, manager } = harness(bundles, versions, undefined, { intervalMinutes: 360, skip: ['pinned'] })
+  const state = await callRoute(ctx, { action: 'refresh' })
+  const byName = Object.fromEntries(state.plugins.map((row) => [row.name, row]))
+  assert.equal(byName.pinned.state, 'blocked')
+  assert.equal(byName.pinned.reason, 'skipped-by-config')
+  assert.equal(manager.calls.listVersions.includes('pinned'), false, 'a skipped name is never looked up')
+  await callRoute(ctx, { action: 'updateAll' })
+  await settle(ctx, await callRoute(ctx, { action: 'state' }))
+  assert.deepEqual(manager.calls.updateBundle.map((call) => call.name), ['wanted'])
+  ctx.disposeAll()
+})
+
+test('an update that needs build scripts approved says so', async () => {
+  const bundles = [mine('built', '1.0.0')]
+  const { ctx } = harness(bundles, { built: listed([versionRecord('2.0.0')]) }, async (name) => ({
+    from: '1.0.0',
+    to: '2.0.0',
+    step: 'install',
+    result: {
+      changed: false,
+      application: 'failed',
+      stage: 'install',
+      target: name,
+      error: { code: 'operation-error' },
+      pendingBuilds: ['esbuild', 'sharp'],
+    },
+  }))
+  await callRoute(ctx, { action: 'refresh' })
+  await callRoute(ctx, { action: 'updateAll' })
+  const state = await settle(ctx, await callRoute(ctx, { action: 'state' }))
+  const row = state.run.results[0]
+  assert.equal(row.outcome, 'failed')
+  assert.deepEqual(row.pendingBuilds, ['esbuild', 'sharp'], 'the blocked build scripts are named')
+  ctx.disposeAll()
+})
+
 let failed = 0
 for (const { name, fn } of tests) {
   try {

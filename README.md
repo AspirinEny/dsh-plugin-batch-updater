@@ -148,6 +148,26 @@ layout, styling, or how the page actually looks.
 
 ## Changelog
 
+### 0.1.2
+
+- `skip` now actually works: it was documented but missing from the settings
+  schema, so the profile stripped it before the plugin ever saw it.
+- One list instead of two. The updatable rows are derived from the rendered
+  list, so a row can no longer offer an Update button after the batch already
+  took it out of the queue.
+- Version lookups run four at a time instead of one after another; a profile
+  with a dozen plugins no longer waits out a dozen round trips.
+- A published version equal to the installed one is not treated as an update.
+- A refused version lookup now reports its small code (`not-found`,
+  `network`, …) instead of pasting an English sentence into the UI.
+- **Dismiss** on the result block now dismisses it; the button used to do
+  nothing on the page (only the toast honoured it).
+- An update that fails because new build scripts were never approved now names
+  them and says what to do, instead of showing a bare failure code.
+- The interval field gets real input styling instead of borrowing the button's.
+- The count reads "N installed plugins, M enabled" so a disabled plugin is not
+  counted as something that will update.
+
 ### 0.1.1
 
 - Fix: saving the check interval used to restart the plugin, which emptied the

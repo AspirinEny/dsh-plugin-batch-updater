@@ -76,6 +76,10 @@ function buildConfigSchema() {
         .boolean()
         .default(false)
         .description('Offer prerelease versions as update targets.'),
+      skip: z
+        .array(z.string())
+        .default([])
+        .description('Package names this page must never touch.'),
     })
   } catch {
     return null
@@ -219,11 +223,17 @@ function skipReasonFor(bundle, cfg) {
 /**
  * Pick the version a batch may install: versions arrive newest first, so the
  * first one that passes every admission rule is the target.
+ *
+ * A candidate equal to the installed version is not an update. The manager
+ * normally omits it, but treating "same version" as a target would issue a
+ * pointless remove-and-reinstall, so it is filtered here too.
+ *
  * @param versions - `PluginVersion[]` from `listVersions()`.
  * @param includePrerelease - whether prereleases may be installed.
+ * @param installedVersion - the version in place now.
  * @returns the chosen version, or undefined.
  */
-function pickTarget(versions, includePrerelease) {
+function pickTarget(versions, includePrerelease, installedVersion) {
   if (!Array.isArray(versions)) return undefined
   for (const version of versions) {
     if (version === null || typeof version !== 'object') continue
@@ -232,6 +242,7 @@ function pickTarget(versions, includePrerelease) {
     if (version.incompatible !== undefined && version.incompatible !== null) continue
     if (version.prerelease === true && includePrerelease !== true) continue
     if (typeof version.version !== 'string' || version.version === '') continue
+    if (installedVersion !== '' && version.version === installedVersion) continue
     return version
   }
   return undefined
@@ -302,11 +313,16 @@ function outcomeOf(result) {
   const application = typeof change.application === 'string' ? change.application : 'failed'
   const code = typeof change.error?.code === 'string' ? change.error.code : ''
   const step = typeof result?.step === 'string' ? result.step : ''
-  if (application === 'applied') return { outcome: 'applied', code: '', step }
-  if (application === 'restart-required') return { outcome: 'restart-required', code: '', step }
-  if (application === 'cancelled') return { outcome: 'cancelled', code, step }
-  if (application === 'overridden') return { outcome: 'overridden', code, step }
-  return { outcome: 'failed', code: code === '' ? `failed-at-${step || 'unknown'}` : code, step }
+  // A newer version whose install scripts were never approved fails here, and
+  // the remedy is a one-off approval rather than a retry: say which builds.
+  const pendingBuilds = Array.isArray(change.pendingBuilds)
+    ? change.pendingBuilds.filter((value) => typeof value === 'string')
+    : []
+  if (application === 'applied') return { outcome: 'applied', code: '', step, pendingBuilds }
+  if (application === 'restart-required') return { outcome: 'restart-required', code: '', step, pendingBuilds }
+  if (application === 'cancelled') return { outcome: 'cancelled', code, step, pendingBuilds }
+  if (application === 'overridden') return { outcome: 'overridden', code, step, pendingBuilds }
+  return { outcome: 'failed', code: code === '' ? `failed-at-${step || 'unknown'}` : code, step, pendingBuilds }
 }
 
 /**
@@ -348,10 +364,49 @@ export function apply(ctx, config) {
     lastCheckError: null,
     checked: 0,
     plugins: [],
-    updatable: [],
-    blocked: [],
     run: null,
     stale: false,
+  }
+
+  /**
+   * The rows that can move right now.
+   *
+   * Derived from `plugins` rather than kept beside it: two lists drifting apart
+   * is how a row keeps offering an Update button after the batch already took
+   * it out of the queue.
+   * @returns the updatable entries, in list order.
+   */
+  function updatableRows() {
+    return state.plugins
+      .filter((row) => row.state === 'updatable')
+      .map((row) => ({
+        name: row.name,
+        installedVersion: row.installedVersion,
+        targetVersion: row.targetVersion,
+        registry: row.registry,
+      }))
+  }
+
+  /**
+   * Map several items through an async function, at most `limit` at a time.
+   * @param items - the input list.
+   * @param limit - how many may be in flight.
+   * @param run - the async function.
+   * @returns the results, in input order.
+   */
+  async function mapLimit(items, limit, run) {
+    const results = new Array(items.length)
+    let next = 0
+    const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+      for (;;) {
+        const index = next
+        next += 1
+        if (index >= items.length) return
+        results[index] = await run(items[index], index)
+      }
+    })
+    await Promise.all(workers)
+    return results
   }
 
   /**
@@ -369,76 +424,60 @@ export function apply(ctx, config) {
     const bundles = await manager.listBundles()
     const all = Array.isArray(bundles) ? bundles : []
     const mine = all.filter(isUserInstalled)
-    const plugins = []
-    const updatable = []
-    const blocked = []
-    for (const bundle of mine) {
+    const settings = cfg()
+
+    // Versions are read concurrently, but not all at once: each lookup is a
+    // package-manager call, and a profile with a dozen plugins would otherwise
+    // serialize a dozen round trips.
+    const rows = await mapLimit(mine, 4, async (bundle) => {
       const installedVersion = typeof bundle.version === 'string' ? bundle.version : ''
-      const row = {
-        name: bundle.name,
-        installedVersion,
-        enabled: bundle.enabled === true,
-        targetVersion: null,
-        registry: null,
-        state: 'current',
-        reason: null,
-      }
-      const skip = skipReasonFor(bundle, cfg)
-      if (skip !== null) {
-        row.state = 'blocked'
-        row.reason = skip
-        plugins.push(row)
-        blocked.push({ name: bundle.name, reason: skip })
-        continue
+      /** @type {null | string} */
+      let reason = skipReasonFor(bundle, () => settings)
+      if (reason !== null) {
+        return { name: bundle.name, installedVersion, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason }
       }
       let versions
       try {
         versions = await manager.listVersions(bundle.name)
       } catch (error) {
-        row.state = 'blocked'
-        row.reason = `version-lookup-failed:${messageOf(error)}`
-        plugins.push(row)
-        blocked.push({ name: bundle.name, reason: row.reason })
-        continue
+        return { name: bundle.name, installedVersion, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason: `version-lookup-failed:${messageOf(error)}` }
       }
       if (versions?.status !== 'listed') {
-        const reason = typeof versions?.reason === 'string' ? versions.reason : 'version-lookup-refused'
-        row.state = 'blocked'
-        row.reason = reason
-        plugins.push(row)
-        blocked.push({ name: bundle.name, reason })
-        continue
+        // `problem` is a small code ('not-found', 'network', ...) the page can
+        // translate; `reason` is a full English sentence meant for a log.
+        const problem = typeof versions?.problem === 'string' ? versions.problem : 'unknown'
+        return { name: bundle.name, installedVersion, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason: problem }
       }
-      const target = pickTarget(versions.versions, cfg().includePrerelease)
+      const target = pickTarget(versions.versions, settings.includePrerelease, installedVersion)
       if (target === undefined) {
-        const why = explainNoTarget(versions.versions)
-        if (why !== null) {
-          row.state = 'blocked'
-          row.reason = why
-          blocked.push({ name: bundle.name, reason: why })
+        reason = explainNoTarget(versions.versions)
+        return {
+          name: bundle.name,
+          installedVersion,
+          enabled: bundle.enabled === true,
+          targetVersion: null,
+          registry: null,
+          state: reason === null ? 'current' : 'blocked',
+          reason,
         }
-        plugins.push(row)
-        continue
       }
-      row.state = 'updatable'
-      row.targetVersion = target.version
-      row.registry = typeof versions.registry === 'string' ? versions.registry : null
-      plugins.push(row)
-      updatable.push({
+      return {
         name: bundle.name,
         installedVersion,
+        enabled: bundle.enabled === true,
         targetVersion: target.version,
-        registry: row.registry,
-      })
-    }
+        registry: typeof versions.registry === 'string' ? versions.registry : null,
+        state: 'updatable',
+        reason: null,
+      }
+    })
+
     state.checked = mine.length
-    state.plugins = plugins
-    state.updatable = updatable
-    state.blocked = blocked
+    state.plugins = rows
     state.lastCheckAt = Date.now()
     state.lastCheckError = null
     state.stale = false
-    return updatable
+    return updatableRows()
   }
 
   /**
@@ -486,6 +525,7 @@ export function apply(ctx, config) {
         code: detail.code,
         step: detail.step,
         registry: item.registry ?? null,
+        pendingBuilds: detail.pendingBuilds.length > 0 ? detail.pendingBuilds : undefined,
       })
     } catch (error) {
       run.results.push({
@@ -603,12 +643,11 @@ export function apply(ctx, config) {
   async function runAll() {
     if (running !== null) return running
     if (manager === undefined) throw new Error('plugin manager is not available')
-    if (state.updatable.length === 0) {
+    if (updatableRows().length === 0) {
       await refresh().catch(() => undefined)
     }
-    const queue = state.updatable.map((item) => ({ ...item }))
+    const queue = updatableRows()
     if (queue.length === 0) return null
-    state.updatable = []
     return startBatch(queue, 'all')
   }
 
@@ -621,9 +660,8 @@ export function apply(ctx, config) {
     if (running !== null) return running
     if (manager === undefined) throw new Error('plugin manager is not available')
     const wanted = new Set(Array.isArray(names) ? names : [])
-    const queue = state.updatable.filter((item) => wanted.has(item.name)).map((item) => ({ ...item }))
+    const queue = updatableRows().filter((item) => wanted.has(item.name))
     if (queue.length === 0) return null
-    state.updatable = state.updatable.filter((item) => !wanted.has(item.name))
     return startBatch(queue, 'selected')
   }
 
@@ -654,6 +692,8 @@ export function apply(ctx, config) {
    * @returns a plain JSON snapshot.
    */
   function snapshot() {
+    const settings = cfg()
+    const updatable = updatableRows()
     return {
       ok: true,
       available: manager !== undefined,
@@ -663,13 +703,15 @@ export function apply(ctx, config) {
       stale: state.stale,
       checked: state.checked,
       plugins: state.plugins,
-      updatable: state.updatable,
-      blocked: state.blocked,
+      updatable,
+      blocked: state.plugins
+        .filter((row) => row.state === 'blocked')
+        .map((row) => ({ name: row.name, reason: row.reason })),
       run: state.run,
       config: {
-        intervalMinutes: cfg().intervalMinutes,
-        autoApply: cfg().autoApply,
-        includePrerelease: cfg().includePrerelease,
+        intervalMinutes: settings.intervalMinutes,
+        autoApply: settings.autoApply,
+        includePrerelease: settings.includePrerelease,
       },
     }
   }
@@ -866,15 +908,14 @@ export function apply(ctx, config) {
                 if (name === '' || target === '') {
                   return reply({ ok: false, code: 'bad-request', message: 'updateOne needs a name and a version' })
                 }
-                // Only versions the last check actually found may be installed,
-                // so the page cannot ask for a target that was never verified.
-                const known = state.updatable.find((row) => row.name === name && row.targetVersion === target)
+                // Only a target the last check actually found may be installed,
+                // and the check is `plugins` — the list the page renders — not a
+                // queue that a running batch may already have drained.
+                const known = updatableRows().find((row) => row.name === name && row.targetVersion === target)
                 if (known === undefined) {
                   return reply({ ok: false, code: 'unknown-target', message: `${name}@${target} is not a checked target` })
                 }
-                const installed = known.installedVersion
-                const registry = known.registry ?? null
-                await runOne(name, target, installed, registry)
+                await runOne(name, target, known.installedVersion, known.registry ?? null)
                 return reply({ ...snapshot(), started: true })
               }
               if (action === 'retryFailed') {
