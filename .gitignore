@@ -2,3 +2,8 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# Never commit credentials. A token file may be placed here so it does not
+# have to be pasted into a chat transcript; it must stay out of git.
+.gh-token
+*.token
