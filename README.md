@@ -121,8 +121,11 @@ node scripts/embed-locale.mjs
 # failure continuation, cancel, interval floor
 node test/host.test.mjs
 
-# Browser half: slot registration, dictionaries, and six page states render
+# Browser half: slot registration, dictionaries, and seven page states render
 node test/client.test.mjs
+
+# Against a running Harness: confirm the route is mounted behind its login fence
+node test/live-interval.mjs
 ```
 
 `client.test.mjs` drives the components with a small React shim, because React

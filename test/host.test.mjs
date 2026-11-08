@@ -586,6 +586,40 @@ test('a save that cannot be written is reported, not silently ignored', async ()
   ctx.disposeAll()
 })
 
+test('a settings service that throws on lookup does not fail an applied save', async () => {
+  const store = { intervalMinutes: 360 }
+  const handle = {
+    get: () => store.intervalMinutes,
+    [Symbol.for('cosmokit.volatile.write')]: (next) => {
+      store.intervalMinutes = next
+    },
+  }
+  const ctx = fakeContext({
+    pluginManager: fakeManager([mine('a', '1.0.0')], { a: listed([versionRecord('2.0.0')]) }),
+    // Cordis refuses an un-injected property access by throwing.
+    settings: undefined,
+    connection: {
+      fetch: {
+        register: (route) => {
+          ctx.setHandler(route.path, route.fetch)
+          return async () => {}
+        },
+      },
+    },
+  })
+  const originalGet = ctx.get
+  ctx.get = (name) => {
+    if (name === 'settings') throw new Error('cannot get property "settings" without inject')
+    return originalGet(name)
+  }
+  apply(ctx, { intervalMinutes: handle, autoApply: false, includePrerelease: false, skip: [] })
+  const saved = await callRoute(ctx, { action: 'setInterval', minutes: 90 })
+  assert.equal(saved.ok, true, 'the applied change stands')
+  assert.equal(saved.persisted, false, 'and it is honest about not being stored')
+  assert.equal(saved.config.intervalMinutes, 90)
+  ctx.disposeAll()
+})
+
 test('update progress from the manager reaches the running item', async () => {
   const versions = { slow: listed([versionRecord('2.0.0')]) }
   let release

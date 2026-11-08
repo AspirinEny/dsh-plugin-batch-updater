@@ -709,7 +709,14 @@ export function apply(ctx, config) {
    * @returns true when it was written.
    */
   async function persistInterval(minutes) {
-    const settings = ctx.get('settings')
+    // `ctx.get` is read defensively: a profile that does not compose the
+    // settings service must not turn an already-applied change into a failure.
+    let settings
+    try {
+      settings = ctx.get('settings')
+    } catch {
+      return false
+    }
     if (settings === undefined || typeof settings.describe !== 'function') return false
     let descriptors
     try {
