@@ -351,10 +351,19 @@ const failed = {
   data: { ok: false, code: 'network', message: 'fetch failed' },
 }
 
+// A transport failure while a good list is already on screen: the list must
+// stay, and the page must NOT claim the profile has no plugin manager.
+const blipped = {
+  loading: false,
+  dismissedRunAt: null,
+  error: { code: 'network', message: 'fetch failed' },
+  data: idle.data,
+}
+
 const tab = bySlot.get('plugins.tab').component
 const toast = bySlot.get('shell.overlay').component
 
-const states = { loading, idle, finished, running, unavailable, failed }
+const states = { loading, idle, finished, running, unavailable, failed, blipped }
 for (const [label, snapshot] of Object.entries(states)) {
   const store = stubStore(snapshot)
   const html = render(React.createElement(tab, { t, store, install() {}, openPackage() {} }))
@@ -418,8 +427,20 @@ assert.ok(runningHtml.includes('更新中'), 'and says it is updating')
 // The unavailable and failed states are told plainly.
 const unavailableHtml = renderTab(unavailable)
 assert.ok(unavailableHtml.includes('没有插件管理服务'), 'an unavailable profile is told plainly')
+
+// A transport blip is not the same failure: the list stays and the wording differs.
+const blippedHtml = renderTab(blipped)
+assert.equal(
+  blippedHtml.includes('没有插件管理服务'),
+  false,
+  'a failed request does not claim the profile has no plugin manager',
+)
+assert.ok(blippedHtml.includes('dsh-cost-meter'), 'the last known list stays on screen')
+assert.ok(blippedHtml.includes('暂时连不上'), 'and the real problem is named')
+assert.ok(blippedHtml.includes('立即重试'), 'with a way to retry')
+
 const failedHtml = renderTab(failed)
-assert.ok(failedHtml.includes('fetch failed') || failedHtml.includes('检查失败'), 'a transport failure is surfaced')
+assert.ok(failedHtml.includes('检查失败') || failedHtml.includes('fetch failed'), 'a transport failure is surfaced')
 const loadingHtml = renderTab(loading)
 assert.ok(loadingHtml.includes('正在读取插件列表'), 'the first paint says it is loading')
 

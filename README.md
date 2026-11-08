@@ -65,14 +65,18 @@ profile's `cordis.patch.yml`:
     skip: []                  # package names never touched
 ```
 
-Saving from the page writes through the config editor, so the value survives a
-restart. `autoApply` defaults to **false**: a scheduled run replaces plugins
-while the app is in use, and checking automatically while updating on request
-keeps that decision with you.
+Saving from the page writes the value through the settings service, so it
+survives a restart. `autoApply` defaults to **false**: a scheduled run replaces
+plugins while the app is in use, and checking automatically while updating on
+request keeps that decision with you.
 
-There is no schemastery `Config` export here on purpose — it was tried, and a
-plugin installed as a symlinked checkout never had it recognised, so it would
-have been a declaration that silently did nothing.
+`intervalMinutes` is declared `.volatile()`. That is not a detail: an ordinary
+config field restarts the plugin when it changes, which tears down the route and
+every bit of state the page is showing — the tab would empty out and report that
+the profile had no plugin manager. A volatile field is applied in place. If the
+write to the profile is refused (a higher-priority layer pinning the value, for
+example), the change still applies to the running process and the page says so
+rather than pretending it was stored.
 
 ## How it works
 
@@ -100,7 +104,9 @@ the Host's own origin fence and browser login.
 The route answers `state`, `refresh`, `updateAll`, `updateSelected`, `updateOne`,
 `retryFailed`, `setInterval` and `cancel`. `updateOne` refuses any `name@version`
 pair the last check did not itself verify, so the page cannot ask the Host to
-install a target that was not vetted against the running DSH.
+install a target that was not vetted against the running DSH. `setInterval`
+writes the field's volatile handle (so the running instance picks it up) and then
+asks the settings service to store it (so it survives a restart).
 
 Progress polling follows the answer: about once a second while a batch is
 running, every 20 seconds otherwise.
@@ -136,6 +142,23 @@ layout, styling, or how the page actually looks.
   pnpm build scripts, its installation fails and the manager reinstalls the
   previous version. Approve those scripts once through an ordinary install,
   then update again.
+
+## Changelog
+
+### 0.1.1
+
+- Fix: saving the check interval used to restart the plugin, which emptied the
+  tab and made it report "this profile has no plugin manager". The interval is
+  now a volatile field applied in place, and a refused profile write is reported
+  instead of being passed off as saved.
+- Fix: a failed request no longer reads as "no plugin manager"; the last known
+  list stays on screen, the real problem is named, and there is a retry.
+- The settings schema is recognised again, so the interval is also editable from
+  the plugin's own Configure page.
+
+### 0.1.0
+
+- First release.
 
 ## License
 

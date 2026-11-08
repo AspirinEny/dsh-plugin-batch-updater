@@ -25,17 +25,19 @@ export const name = 'dsh-batch-updater'
 /** No hard dependency: the row stays inactive where nothing it needs exists. */
 export const inject = []
 
-/*
- * Settings are edited from the Updates tab itself (see the `setInterval`
- * action), not through a schemastery `Config` export.
+/**
+ * The settings the Plugin Manager renders for this row.
  *
- * That was tried: the schema has to be resolved synchronously at activation and
- * then read by the Loader, and a plugin installed as a symlinked checkout never
- * got its `Config` recognised — the row stayed on the interval baked into
- * `cordis.patch.yml`. Rather than ship a declaration that silently does
- * nothing, the interval is an ordinary value the page reads and writes, and
- * `cordis.patch.yml` keeps the starting point.
+ * `intervalMinutes` is `.volatile()`: the config editor writes it in place, the
+ * plugin is *not* restarted, and the running instance reads the new value
+ * through the handle. That distinction matters — an ordinary field restarts the
+ * plugin, which tears down this route and every bit of state the page is
+ * showing, and the page then looks broken.
+ *
+ * Schemastery is resolved synchronously here because the Loader reads `Config`
+ * during activation; a top-level `await` would arrive too late.
  */
+export const Config = buildConfigSchema()
 
 
 
@@ -50,13 +52,112 @@ const BOOT_CHECK_DELAY_MS = 12_000
 const NON_REGISTRY_SPEC = /^(?:git\+|git:|file:|link:|https?:|github:|workspace:|portal:)/i
 
 /**
+ * Build the row's schema, or null when schemastery cannot be reached.
+ * @returns the schema, or null.
+ */
+function buildConfigSchema() {
+  const z = resolveSchemastery()
+  if (typeof z?.object !== 'function') return null
+  try {
+    return z.object({
+      intervalMinutes: z
+        .number()
+        .step(1)
+        .min(5)
+        .max(10080)
+        .default(360)
+        .description('How often to check for new plugin versions, in minutes.')
+        .volatile(),
+      autoApply: z
+        .boolean()
+        .default(false)
+        .description('Install what a scheduled check finds, without asking. Keep this off to check only.'),
+      includePrerelease: z
+        .boolean()
+        .default(false)
+        .description('Offer prerelease versions as update targets.'),
+    })
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Load the Host's schemastery from wherever this copy of the plugin sits.
+ *
+ * A symlinked checkout resolves modules by its real path, so plain ESM `import`
+ * and a `createRequire` rooted at the symlink can both miss the profile's
+ * hoisted copy. Trying the profile directory and then walking up from this file
+ * covers both layouts.
+ *
+ * @returns the schemastery namespace, or null.
+ */
+function resolveSchemastery() {
+  const bases = [import.meta.url]
+  const profileDir = process.env.DSH_PROFILE_DIR
+  if (typeof profileDir === 'string' && profileDir !== '') {
+    bases.push(pathToFileURL(join(profileDir, 'package.json')).href)
+  }
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (let depth = 0; depth < 8; depth += 1) {
+    bases.push(pathToFileURL(join(dir, 'package.json')).href)
+    dir = dirname(dir)
+  }
+  for (const base of bases) {
+    try {
+      const req = createRequire(base)
+      const mod = req('@deepseek-ai/schemastery')
+      const z = mod?.default ?? mod
+      if (typeof z?.object === 'function') return z
+    } catch {
+      // Try the next base.
+    }
+  }
+  return null
+}
+
+/**
+ * Read a value that may be a plain value or a `volatile` handle.
+ * @param value - the config field.
+ * @returns the current value.
+ */
+function readVolatile(value) {
+  if (value !== null && typeof value === 'object' && typeof value.get === 'function') {
+    try {
+      return value.get()
+    } catch {
+      return undefined
+    }
+  }
+  return value
+}
+
+/**
+ * Write a `volatile` config field in place, without restarting the plugin.
+ * @param handle - the field's handle from `Config`.
+ * @param next - the value to store.
+ * @returns true when the write went through.
+ */
+function writeVolatile(handle, next) {
+  if (handle === null || typeof handle !== 'object') return false
+  const writer = handle[Symbol.for('cosmokit.volatile.write')]
+  if (typeof writer !== 'function') return false
+  try {
+    writer(next)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * Read the row's config with defaults.
  * @param raw - the value the Loader passed to `apply`.
  * @returns a complete, validated config.
  */
 function normalizeConfig(raw) {
   const input = raw !== null && typeof raw === 'object' ? raw : {}
-  const minutes = Number(input.intervalMinutes)
+  const minutes = Number(readVolatile(input.intervalMinutes))
   const skip = Array.isArray(input.skip)
     ? input.skip.filter((value) => typeof value === 'string' && value.trim() !== '')
     : []
@@ -102,7 +203,7 @@ function skipReasonFor(bundle, cfg) {
   const name = typeof bundle.name === 'string' ? bundle.name : ''
   if (name === '') return 'unreadable'
   if (name === SELF_NAME) return 'self'
-  if (cfg.skip.includes(name)) return 'skipped-by-config'
+  if (cfg().skip.includes(name)) return 'skipped-by-config'
   // The manager itself already answers false for git, path, tarball and
   // installation-provided bundles; these checks keep the reason visible.
   if (bundle.updatable !== true) {
@@ -214,15 +315,23 @@ function outcomeOf(result) {
  * @param config - the row's config.
  */
 export function apply(ctx, config) {
-  const cfg = normalizeConfig(config)
+  /**
+   * The settings in force right now.
+   *
+   * `intervalMinutes` is a `volatile` handle, so the value can change while the
+   * plugin keeps running; reading through `normalizeConfig` each time means the
+   * timer, the check and the page never disagree about it.
+   * @returns a complete config snapshot.
+   */
+  const cfg = () => normalizeConfig(config)
   // One line at activation: a profile that set `config:` in its row can confirm
   // here that the value arrived, without reading any state the page shows.
   ctx.logger?.info?.(
     'dsh-batch-updater: interval %d min, autoApply %s, prerelease %s, skip %d',
-    cfg.intervalMinutes,
-    String(cfg.autoApply),
-    String(cfg.includePrerelease),
-    cfg.skip.length,
+    cfg().intervalMinutes,
+    String(cfg().autoApply),
+    String(cfg().includePrerelease),
+    cfg().skip.length,
   )
 
   /** The manager service, present only while the profile composes it. */
@@ -300,7 +409,7 @@ export function apply(ctx, config) {
         blocked.push({ name: bundle.name, reason })
         continue
       }
-      const target = pickTarget(versions.versions, cfg.includePrerelease)
+      const target = pickTarget(versions.versions, cfg().includePrerelease)
       if (target === undefined) {
         const why = explainNoTarget(versions.versions)
         if (why !== null) {
@@ -558,9 +667,9 @@ export function apply(ctx, config) {
       blocked: state.blocked,
       run: state.run,
       config: {
-        intervalMinutes: cfg.intervalMinutes,
-        autoApply: cfg.autoApply,
-        includePrerelease: cfg.includePrerelease,
+        intervalMinutes: cfg().intervalMinutes,
+        autoApply: cfg().autoApply,
+        includePrerelease: cfg().includePrerelease,
       },
     }
   }
@@ -568,35 +677,63 @@ export function apply(ctx, config) {
   /**
    * Save a new schedule and apply it without restarting the plugin.
    *
-   * The value lands in this profile's own `cordis.patch.yml` through the config
-   * editor, which keeps the rest of that file intact. The timer is re-armed from
-   * the new value here. Without an editor the change still applies to this
-   * running process — the page does not lie about the number it shows — it just
-   * will not survive a restart.
+   * `intervalMinutes` is `volatile`, so both halves of this are safe: writing
+   * the field's own handle updates the running instance in place, and
+   * `settings.update` — the same path the Configure form uses — persists it
+   * without a reload. Either one alone would be wrong: `configEditor.edit`
+   * restarts the plugin and tears down every bit of state the page is showing
+   * (that was the "save, then the list vanishes" bug), and a volatile write by
+   * itself is forgotten on the next start.
+   *
+   * Persistence is best-effort: a profile without the settings service, or one
+   * that refuses the write, still gets the new schedule for this process rather
+   * than a failed save.
    *
    * @param minutes - the requested interval.
-   * @returns true when it was saved.
+   * @returns `{ applied, persisted }`, or null when the value is out of range.
    */
   async function setIntervalMinutes(minutes) {
     const next = Number(minutes)
-    if (!Number.isFinite(next) || next < MIN_INTERVAL_MINUTES) return false
+    if (!Number.isFinite(next) || next < MIN_INTERVAL_MINUTES) return null
     const rounded = Math.floor(next)
-    const entry = ctx.fiber?.entry
-    const editor = ctx.get('configEditor')
-    if (entry === undefined || editor === undefined) {
-      cfg.intervalMinutes = rounded
-      rearm()
-      return true
-    }
+    const handle = config !== null && typeof config === 'object' ? config.intervalMinutes : undefined
+    if (!writeVolatile(handle, rounded)) return null
+    rearm()
+    const persisted = await persistInterval(rounded)
+    return { applied: true, persisted }
+  }
+
+  /**
+   * Write the interval into the profile through the settings service.
+   * @param minutes - the value to store.
+   * @returns true when it was written.
+   */
+  async function persistInterval(minutes) {
+    const settings = ctx.get('settings')
+    if (settings === undefined || typeof settings.describe !== 'function') return false
+    let descriptors
     try {
-      await editor.edit(entry, (current) => ({ ...current, intervalMinutes: rounded }))
+      descriptors = settings.describe()
     } catch {
-      // A rejected write must not look like a saved setting.
       return false
     }
-    cfg.intervalMinutes = rounded
-    rearm()
-    return true
+    if (!Array.isArray(descriptors)) return false
+    // The namespace is the profile entry id, which is addressable in more than
+    // one form depending on how the row was installed; ask each in turn.
+    const candidates = [SELF_NAME, `include:${SELF_NAME}`, ctx.fiber?.entry?.id].filter(
+      (value) => typeof value === 'string' && value !== '',
+    )
+    for (const ns of candidates) {
+      const found = descriptors.find((entry) => String(entry?.ns) === ns)
+      if (found === undefined) continue
+      try {
+        await settings.update(ns, { intervalMinutes: minutes }, found.revision)
+        return true
+      } catch {
+        // Try the next spelling.
+      }
+    }
+    return false
   }
 
   /** Re-arm the schedule after the interval changed. */
@@ -615,7 +752,7 @@ export function apply(ctx, config) {
     if (running !== null) return
     try {
       const updatable = await refresh()
-      if (cfg.autoApply && Array.isArray(updatable) && updatable.length > 0) {
+      if (cfg().autoApply && Array.isArray(updatable) && updatable.length > 0) {
         await runAll()
       }
     } catch {
@@ -640,7 +777,7 @@ export function apply(ctx, config) {
         const boot = setTimeout(() => void scheduledPass(), BOOT_CHECK_DELAY_MS)
         if (typeof boot.unref === 'function') boot.unref()
         timers.push(boot)
-        const period = Math.max(MIN_INTERVAL_MINUTES, cfg.intervalMinutes) * 60_000
+        const period = Math.max(MIN_INTERVAL_MINUTES, cfg().intervalMinutes) * 60_000
         const ticker = setInterval(() => void scheduledPass(), period)
         if (typeof ticker.unref === 'function') ticker.unref()
         timers.push(ticker)
@@ -704,10 +841,14 @@ export function apply(ctx, config) {
               }
               if (action === 'setInterval') {
                 const saved = await setIntervalMinutes(body?.minutes)
-                if (!saved) {
-                  return reply({ ok: false, code: 'bad-value', message: 'intervalMinutes must be at least 5 minutes' })
+                if (saved === null) {
+                  return reply({
+                    ok: false,
+                    code: 'bad-value',
+                    message: `intervalMinutes must be between ${MIN_INTERVAL_MINUTES} and 10080 minutes`,
+                  })
                 }
-                return reply(snapshot())
+                return reply({ ...snapshot(), persisted: saved.persisted })
               }
               if (action === 'updateOne') {
                 if (manager === undefined) {

@@ -41,6 +41,10 @@ window.__ModuleLoader__.load({
       "selectRow": "选择 {name}",
       "intervalLabel": "检查间隔（分钟）",
       "intervalSave": "保存",
+      "intervalBad": "没能保存：{message}",
+      "intervalNotSaved": "已生效，但没能写入配置，重启后会恢复原值。",
+      "unreachable": "暂时连不上 DSH 宿主（{message}），正在自动重试。",
+      "retryConnect": "立即重试",
       "autoOff": "· 只检查，不自动安装",
       "autoOn": "· 发现更新会自动安装",
       "selfNote": "只显示你自行安装的插件；DSH 自带的插件和本插件不在列表中。",
@@ -100,6 +104,10 @@ window.__ModuleLoader__.load({
       "selectRow": "Select {name}",
       "intervalLabel": "Check every (minutes)",
       "intervalSave": "Save",
+      "intervalBad": "Could not save: {message}",
+      "intervalNotSaved": "Applied, but it could not be written to the profile; it reverts on restart.",
+      "unreachable": "Cannot reach the DSH host right now ({message}); retrying automatically.",
+      "retryConnect": "Retry now",
       "autoOff": "· checks only, never installs",
       "autoOn": "· installs what it finds",
       "selfNote": "Only the plugins you installed yourself; DSH's own bundles and this plugin are left out.",
@@ -216,7 +224,14 @@ window.__ModuleLoader__.load({
         if (inFlight !== null) return inFlight
         inFlight = (async () => {
           const data = await callHost('state')
-          publish({ loading: false, data, error: data?.ok === false ? data : null })
+          // A transport failure keeps the last known list on screen; dropping it
+          // would make a one-second blip look like the profile lost its plugins.
+          const failed = data?.ok === false
+          publish({
+            loading: false,
+            data: failed ? snapshot.data : data,
+            error: failed ? { message: data.message ?? '', code: data.code ?? '' } : null,
+          })
           inFlight = null
           return data
         })()
@@ -253,7 +268,13 @@ window.__ModuleLoader__.load({
          */
         act: async (action, payload) => {
           const data = await callHost(action, payload)
-          publish({ loading: false, data: data?.ok === false ? snapshot.data : data, error: data?.ok === false ? data : null })
+          const failed = data?.ok === false
+          publish({
+            loading: false,
+            // A failed action changes nothing, so the previous snapshot stays.
+            data: failed ? snapshot.data : data,
+            error: failed ? { message: data.message ?? '', code: data.code ?? '' } : null,
+          })
           return data
         },
         dismissRun: (startedAt) => {
@@ -488,6 +509,8 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [selected, setSelected] = React.useState({ deselected: [] })
       const [intervalDraft, setIntervalDraft] = React.useState(null)
+      const [intervalError, setIntervalError] = React.useState(null)
+      const [intervalNote, setIntervalNote] = React.useState(null)
 
       React.useEffect(() => {
         store.refresh()
@@ -496,7 +519,17 @@ window.__ModuleLoader__.load({
       const run = data?.run ?? null
       const running = run !== null && (run.status === 'running' || run.status === 'cancelling')
       const plugins = Array.isArray(data?.plugins) ? data.plugins : []
-      const available = data?.available !== false && snapshot.error === null
+      // "The Host says it has no manager" and "we could not reach the Host" are
+      // different failures. Only the first means this profile cannot use the
+      // feature; the second is a transport problem that resolves on its own, and
+      // conflating them told users their plugin manager had vanished whenever a
+      // request happened to fail.
+      const managerMissing = data?.available === false
+      // Any failed request is a transport problem, whether or not an older list
+      // is still on screen. Saying so is what keeps a blip from being mistaken
+      // for a profile without a plugin manager.
+      const unreachable = snapshot.error !== null
+      const available = !managerMissing
       const checkedAt = formatTime(data?.checkedAt)
 
       const updatableNames = plugins.filter((row) => row.state === 'updatable').map((row) => row.name)
@@ -661,12 +694,29 @@ window.__ModuleLoader__.load({
                   className: 'bu-btn',
                   disabled: busy || !available || intervalDraft === null,
                   onClick: async () => {
-                    await act('setInterval', { minutes: Number(intervalValue) })
+                    const answer = await act('setInterval', { minutes: Number(intervalValue) })
+                    // A refused save must say so; silently clearing the draft
+                    // made a rejected value look accepted.
+                    if (answer?.ok === false) {
+                      setIntervalError(answer.message ?? answer.code ?? '')
+                      return
+                    }
+                    // Applied but not written down: the timer really did change,
+                    // so do not claim it failed — say it will not survive a restart.
+                    setIntervalError(null)
+                    setIntervalNote(answer?.persisted === false ? t('intervalNotSaved') : null)
                     setIntervalDraft(null)
                   },
                 },
                 t('intervalSave'),
               ),
+              intervalError !== null
+                ? h('span', { className: 'bu-note', role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)' } },
+                    fill(t('intervalBad'), { message: intervalError }))
+                : null,
+              intervalNote !== null
+                ? h('span', { className: 'bu-note', role: 'status' }, intervalNote)
+                : null,
               h(
                 'span',
                 { className: 'bu-note' },
@@ -677,11 +727,20 @@ window.__ModuleLoader__.load({
             )
           : null,
 
-        available === false
+        managerMissing
           ? h('div', { className: 'bu-cards' }, h('div', { className: 'bu-empty' }, t('noManager')))
           : null,
-        snapshot.error !== null && available === false
-          ? h('div', { className: 'bu-error' }, fill(t('checkFailed'), { message: snapshot.error.message ?? '' }))
+        unreachable
+          ? h(
+              'div',
+              { className: 'bu-error' },
+              `${fill(t('unreachable'), { message: snapshot.error?.message ?? '' })} `,
+              h(
+                'button',
+                { type: 'button', className: 'bu-btn bu-btnGhost', onClick: () => act('state') },
+                t('retryConnect'),
+              ),
+            )
           : null,
         data?.checkError
           ? h('div', { className: 'bu-error' }, fill(t('checkFailed'), { message: data.checkError }))

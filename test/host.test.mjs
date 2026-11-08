@@ -450,6 +450,142 @@ test('rejects an interval below the floor', async () => {
   ctx.disposeAll()
 })
 
+test('saving a new interval applies to the running instance and keeps the list', async () => {
+  // The real config arrives with `intervalMinutes` as a volatile handle; the
+  // bug this covers is that saving used to restart the plugin, so the route and
+  // the list vanished and the page claimed the profile had no plugin manager.
+  const store = { intervalMinutes: 360 }
+  const handle = {
+    get: () => store.intervalMinutes,
+    [Symbol.for('cosmokit.volatile.write')]: (next) => {
+      store.intervalMinutes = next
+    },
+  }
+  const config = { intervalMinutes: handle, autoApply: false, includePrerelease: false, skip: [] }
+  const bundles = [mine('a', '1.0.0')]
+  const manager = fakeManager(bundles, { a: listed([versionRecord('2.0.0')]) })
+  const ctx = fakeContext({
+    pluginManager: manager,
+    connection: {
+      fetch: {
+        register: (route) => {
+          ctx.setHandler(route.path, route.fetch)
+          return async () => {}
+        },
+      },
+    },
+  })
+  apply(ctx, config)
+
+  await callRoute(ctx, { action: 'refresh' })
+  const before = await callRoute(ctx, { action: 'state' })
+  assert.equal(before.available, true)
+  assert.equal(before.plugins.length, 1)
+  assert.equal(before.config.intervalMinutes, 360)
+
+  const saved = await callRoute(ctx, { action: 'setInterval', minutes: 45 })
+  assert.equal(saved.ok, true, 'the save is accepted')
+  assert.equal(saved.available, true, 'the manager is still reachable afterwards')
+  assert.equal(saved.plugins.length, 1, 'the list survives the save')
+  assert.equal(saved.config.intervalMinutes, 45, 'and the new value is in force')
+  assert.equal(store.intervalMinutes, 45, 'written through the volatile handle')
+
+  const again = await callRoute(ctx, { action: 'state' })
+  assert.equal(again.config.intervalMinutes, 45, 'the value sticks for later reads')
+  ctx.disposeAll()
+})
+
+test('the interval is persisted through the settings service', async () => {
+  const store = { intervalMinutes: 360 }
+  const handle = {
+    get: () => store.intervalMinutes,
+    [Symbol.for('cosmokit.volatile.write')]: (next) => {
+      store.intervalMinutes = next
+    },
+  }
+  const writes = []
+  const ctx = fakeContext({
+    pluginManager: fakeManager([mine('a', '1.0.0')], { a: listed([versionRecord('2.0.0')]) }),
+    settings: {
+      describe: () => [
+        { ns: 'someone-else', revision: 1 },
+        { ns: 'dsh-batch-updater', revision: 7 },
+      ],
+      async update(ns, patch, revision) {
+        writes.push({ ns, patch, revision })
+      },
+    },
+    connection: {
+      fetch: {
+        register: (route) => {
+          ctx.setHandler(route.path, route.fetch)
+          return async () => {}
+        },
+      },
+    },
+  })
+  apply(ctx, { intervalMinutes: handle, autoApply: false, includePrerelease: false, skip: [] })
+  const saved = await callRoute(ctx, { action: 'setInterval', minutes: 90 })
+  assert.equal(saved.ok, true)
+  assert.equal(saved.persisted, true, 'the save reports that it was written down')
+  assert.deepEqual(writes, [{ ns: 'dsh-batch-updater', patch: { intervalMinutes: 90 }, revision: 7 }])
+  ctx.disposeAll()
+})
+
+test('a settings write that is refused still applies for this process', async () => {
+  const store = { intervalMinutes: 360 }
+  const handle = {
+    get: () => store.intervalMinutes,
+    [Symbol.for('cosmokit.volatile.write')]: (next) => {
+      store.intervalMinutes = next
+    },
+  }
+  const ctx = fakeContext({
+    pluginManager: fakeManager([mine('a', '1.0.0')], { a: listed([versionRecord('2.0.0')]) }),
+    settings: {
+      describe: () => [{ ns: 'dsh-batch-updater', revision: 7 }],
+      async update() {
+        throw new Error('higher-priority layer overrides this field')
+      },
+    },
+    connection: {
+      fetch: {
+        register: (route) => {
+          ctx.setHandler(route.path, route.fetch)
+          return async () => {}
+        },
+      },
+    },
+  })
+  apply(ctx, { intervalMinutes: handle, autoApply: false, includePrerelease: false, skip: [] })
+  const saved = await callRoute(ctx, { action: 'setInterval', minutes: 90 })
+  assert.equal(saved.ok, true, 'the live change still goes through')
+  assert.equal(saved.persisted, false, 'and the page is told it will not survive a restart')
+  assert.equal(saved.config.intervalMinutes, 90)
+  ctx.disposeAll()
+})
+
+test('a save that cannot be written is reported, not silently ignored', async () => {
+  // No volatile handle (a plain object config): the write cannot be applied, and
+  // the page must be told rather than showing the new number as saved.
+  const ctx = fakeContext({
+    pluginManager: fakeManager([mine('a', '1.0.0')], { a: listed([versionRecord('2.0.0')]) }),
+    connection: {
+      fetch: {
+        register: (route) => {
+          ctx.setHandler(route.path, route.fetch)
+          return async () => {}
+        },
+      },
+    },
+  })
+  apply(ctx, { intervalMinutes: 360 })
+  const answer = await callRoute(ctx, { action: 'setInterval', minutes: 45 })
+  assert.equal(answer.ok, false)
+  assert.equal(answer.code, 'bad-value')
+  ctx.disposeAll()
+})
+
 test('update progress from the manager reaches the running item', async () => {
   const versions = { slow: listed([versionRecord('2.0.0')]) }
   let release

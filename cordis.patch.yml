@@ -1,5 +1,8 @@
 # Bundle patch: the row loads this package's index.js as the Host half (a plain
 # Cordis plugin) and its ./client.js as the browser half, through `dsh.client`.
+#
+# Only the interval is set here. The plugin's own `Config` declares all three
+# settings, so the Plugin Manager's Configure page edits them in place.
 - insert:
     - id: dsh-batch-updater
       name: 'dsh-batch-updater'
