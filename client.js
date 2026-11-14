@@ -34,18 +34,15 @@ window.__ModuleLoader__.load({
       "allUpToDate": "已是最新版本。",
       "checkFailed": "检查失败：{message}",
       "stale": "插件列表有变动，结果可能已过期。",
-      "updatableGroup": "可更新 {count}",
+      "updatableGroup": "从 NPM 安装，可更新 {count} 项",
       "currentGroup": "已是最新 {count}",
       "blockedCount": "无法自动更新 {count}",
       "installedOn": "安装于 {date}",
-      "gitGroup": "从 Git 安装，有新版本 {count}",
-      "gitManualHint": "需重装",
-      "gitCopyCommand": "复制命令",
-      "gitCopied": "已复制",
-      "gitCopyTip": "复制：dsh plugin --profile desktop add {spec}",
+      "gitGroup": "从 GIT 安装，可更新 {count} 项",
       "gitUnreadable": "读不到这个仓库的版本信息",
       "gitUnsupportedHost": "只支持 GitHub / GitLab / Bitbucket 仓库",
       "selectAll": "全选可更新的插件",
+      "updateSelectedCount": "更新所选 {count} 项",
       "selectRow": "选择 {name}",
       "intervalLabel": "检查间隔（分钟）",
       "intervalSave": "保存",
@@ -104,18 +101,15 @@ window.__ModuleLoader__.load({
       "allUpToDate": "Everything is up to date.",
       "checkFailed": "Check failed: {message}",
       "stale": "Your plugins changed, so this result may be out of date.",
-      "updatableGroup": "Can update {count}",
+      "updatableGroup": "From NPM, {count} updatable",
       "currentGroup": "Up to date {count}",
       "blockedCount": "Cannot update automatically {count}",
       "installedOn": "installed {date}",
-      "gitGroup": "Installed from Git, newer version {count}",
-      "gitManualHint": "reinstall to update",
-      "gitCopyCommand": "Copy command",
-      "gitCopied": "Copied",
-      "gitCopyTip": "Copy: dsh plugin --profile desktop add {spec}",
+      "gitGroup": "From GIT, {count} updatable",
       "gitUnreadable": "Could not read this repository's version",
       "gitUnsupportedHost": "Only GitHub / GitLab / Bitbucket repositories are supported",
       "selectAll": "Select every updatable plugin",
+      "updateSelectedCount": "Update {count} selected",
       "selectRow": "Select {name}",
       "intervalLabel": "Check every (minutes)",
       "intervalSave": "Save",
@@ -497,14 +491,15 @@ window.__ModuleLoader__.load({
       const { row, t, openPackage } = props
       const updatable = row.state === 'updatable'
       const gitUpdatable = row.state === 'git-updatable'
+      // Both channels are installed by the same batch, so both get a checkbox
+      // and an Update button; only how the install runs underneath differs.
+      const selectable = updatable || gitUpdatable
       const live = props.live === true
-      const versionText = updatable
+      const versionText = selectable
         ? `${row.installedVersion} → ${row.targetVersion}`
-        : gitUpdatable
-          ? `${row.installedVersion} → ${row.targetVersion} · ${t('gitManualHint')}`
-          : row.state === 'blocked'
-            ? blockedText(row.reason, t)
-            : row.installedVersion
+        : row.state === 'blocked'
+          ? blockedText(row.reason, t)
+          : row.installedVersion
       const installedOn = formatDate(row.installedAt)
       const detail =
         installedOn === ''
@@ -515,8 +510,8 @@ window.__ModuleLoader__.load({
         'div',
         { className: 'bu-row' },
         h(Check, {
-          checked: updatable && props.selected === true,
-          disabled: !updatable || props.busy === true,
+          checked: selectable && props.selected === true,
+          disabled: !selectable || props.busy === true,
           label: fill(t('selectRow'), { name: row.name }),
           onChange: (next) => props.onSelect(row.name, next),
         }),
@@ -554,17 +549,15 @@ window.__ModuleLoader__.load({
                   t('updateThis'),
                 )
               : gitUpdatable
-                // The batch cannot install this one: the dependency has to be
-                // repointed at a commit, which is a profile edit, not an update.
                 ? h(
                     'button',
                     {
                       type: 'button',
                       className: 'bu-btn',
-                      title: fill(t('gitCopyTip'), { spec: String(row.spec ?? '') }),
-                      onClick: () => props.onCopySpec(row),
+                      disabled: props.busy === true || props.running === true,
+                      onClick: () => props.onUpdateOne(row),
                     },
-                    props.copied === true ? t('gitCopied') : t('gitCopyCommand'),
+                    t('updateThis'),
                   )
                 : null,
           row.enabled === false ? h('span', { className: 'bu-badge' }, t('disabledTag')) : null,
@@ -588,9 +581,7 @@ window.__ModuleLoader__.load({
       const [intervalDraft, setIntervalDraft] = React.useState(null)
       const [intervalError, setIntervalError] = React.useState(null)
       const [intervalNote, setIntervalNote] = React.useState(null)
-      // The package whose reinstall command was just copied, so one button can
-      // say so; it clears itself after a moment.
-      const [copiedSpec, setCopiedSpec] = React.useState(null)
+
 
       React.useEffect(() => {
         store.refresh()
@@ -612,10 +603,15 @@ window.__ModuleLoader__.load({
       const available = !managerMissing
       const checkedAt = formatTime(data?.checkedAt)
 
-      const updatableNames = plugins.filter((row) => row.state === 'updatable').map((row) => row.name)
+      const npmRows = plugins.filter((row) => row.state === 'updatable')
+      const gitRows = plugins.filter((row) => row.state === 'git-updatable')
+      // One selection across both channels: the toolbar's Update covers
+      // everything ticked, and each group's own button covers just its rows.
+      const updatableNames = [...npmRows, ...gitRows].map((row) => row.name)
+      const npmNames = npmRows.map((row) => row.name)
+      const gitNames = gitRows.map((row) => row.name)
       const blockedRows = plugins.filter((row) => row.state === 'blocked')
       const currentRows = plugins.filter((row) => row.state === 'current')
-      const gitRows = plugins.filter((row) => row.state === 'git-updatable')
 
       // Selection defaults to "everything that can move", derived rather than
       // set by an effect: a check that finds new work should not leave the
@@ -652,28 +648,6 @@ window.__ModuleLoader__.load({
         setSelected({ deselected: next ? [] : [...updatableNames] })
       }
 
-      /**
-       * Put a Git plugin's reinstall command on the clipboard.
-       *
-       * A Git-installed bundle updates only by repointing its dependency, which
-       * the manager refuses to do from inside itself, so the page hands over the
-       * exact command instead of pretending an Update button would work.
-       * @param row - the git row.
-       */
-      const copySpec = async (row) => {
-        const spec = String(row?.spec ?? '')
-        if (spec === '') return
-        const command = `dsh plugin --profile desktop add ${spec}`
-        try {
-          await navigator.clipboard.writeText(command)
-          setCopiedSpec(row.name)
-          setTimeout(() => setCopiedSpec(null), 2000)
-        } catch {
-          // A browser that refuses clipboard access still shows the spec in the
-          // row's tooltip, so there is nothing to report here.
-        }
-      }
-
       const runFailures = Array.isArray(run?.results) ? run.results.filter((row) => row.outcome === 'failed') : []
       const appliedCount = Array.isArray(run?.results)
         ? run.results.filter((row) => row.outcome === 'applied' || row.outcome === 'restart-required').length
@@ -701,6 +675,26 @@ window.__ModuleLoader__.load({
       const doneCount = run !== null ? (Array.isArray(run.results) ? run.results.length : 0) : 0
       const percent = total > 0 ? Math.min(100, Math.round(((running ? doneCount : total) / total) * 100)) : 0
 
+      /**
+       * The per-group action: update only the ticked rows of this channel.
+       * @param names - every row name the group offers.
+       * @returns the button, or null when none of them is ticked.
+       */
+      const groupButton = (names) => {
+        const picked = names.filter((name) => activeSelection.includes(name))
+        if (picked.length === 0) return null
+        return h(
+          'button',
+          {
+            type: 'button',
+            className: 'bu-btn bu-btnPrimary',
+            disabled: busy || running || !available,
+            onClick: () => act('updateSelected', { names: picked }),
+          },
+          fill(t('updateSelectedCount'), { count: picked.length }),
+        )
+      }
+
       const renderRows = (rows) =>
         h(
           'div',
@@ -715,9 +709,7 @@ window.__ModuleLoader__.load({
               running,
               selected: activeSelection.includes(row.name),
               live: run !== null && run.current !== null && run.current !== undefined && run.current.name === row.name,
-              copied: copiedSpec === row.name,
               onSelect: toggleOne,
-              onCopySpec: copySpec,
               onUpdateOne: (item) => act('updateOne', { name: item.name, version: item.targetVersion }),
             }),
           ),
@@ -961,8 +953,8 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { className: 'bu-groupTitle' },
-                h('span', null, fill(t('updatableGroup'), { count: updatableNames.length })),
-                updatableNames.length > 0
+                h('span', null, fill(t('updatableGroup'), { count: npmNames.length })),
+                npmNames.length > 0
                   ? h(Check, {
                       checked: allSelected,
                       disabled: busy || running,
@@ -970,9 +962,11 @@ window.__ModuleLoader__.load({
                       onChange: toggleAll,
                     })
                   : null,
+                h('span', { className: 'bu-toolbarSpacer' }),
+                groupButton(npmNames),
               ),
               updatableNames.length > 0
-                ? renderRows(plugins.filter((row) => row.state === 'updatable'))
+                ? renderRows(npmRows)
                 : h(
                     'div',
                     { className: 'bu-cards' },
@@ -991,8 +985,8 @@ window.__ModuleLoader__.load({
             )
           : null,
 
-        // Git installs that moved ahead. The batch cannot touch them, so they
-        // get their own group with the exact reinstall command.
+        // Git installs that moved ahead. They are updated by the same batch:
+        // the Host removes the copy and installs its spec again.
         available && gitRows.length > 0
           ? h(
               'div',
@@ -1001,6 +995,8 @@ window.__ModuleLoader__.load({
                 'div',
                 { className: 'bu-groupTitle' },
                 h('span', null, fill(t('gitGroup'), { count: gitRows.length })),
+                h('span', { className: 'bu-toolbarSpacer' }),
+                groupButton(gitNames),
               ),
               renderRows(gitRows),
             )

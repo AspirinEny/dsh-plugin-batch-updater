@@ -65,14 +65,20 @@ This plugin reads the repository instead. For a **Git install** it fetches
 GitLab and Bitbucket), and compares its `version` with the installed one:
 
 - **The repository moved ahead** — the row appears under **Installed from Git**
-  with the newer version, and one button copies the reinstall command:
-  `dsh plugin --profile <name> add <spec>`.
+  with the newer version and its own **Update** button, and it is included in the
+  page's **Update** button like a registry plugin.
 - **It matches** — the row is up to date, like a registry plugin.
 
-These rows are never queued by **Update** or by `autoApply`: replacing the copy
-means repointing the profile's dependency, which is a profile edit rather than
-an update, and the manager refuses to do it while the bundle is running. The
-command is the whole remedy.
+A row whose repository moved ahead is updatable like any other: it joins the same
+batch and the same tick boxes. `updateBundle` has no path for an unpinned Git
+spec — it accepts a Git target only from a dependency pinned to a full commit —
+so the Host removes the copy and installs its saved spec again, which is exactly
+what reinstalling it by hand does. The saved spec is unchanged by that (it stays
+`github:owner/repo`, not a pinned commit), so the next check compares against the
+new copy the same way.
+
+The removal is the risky half, so a target that fails to install is reinstalled
+once from the same spec before the row reports the failure.
 
 A repository this cannot read (private, another host, no `package.json`) is
 shown as blocked with that reason instead of pretending it is up to date.
@@ -176,6 +182,20 @@ layout, styling, or how the page actually looks.
   then update again.
 
 ## Changelog
+
+### 0.1.6
+
+- **Git installs update in place now.** They were reported but not queued, on
+  the grounds that `updateBundle` refuses an unpinned Git spec. The Host now
+  removes the copy and installs its saved spec again — what a manual reinstall
+  does — and verifies the saved spec survives unchanged.
+- **One selection for both channels.** The page's **Update** button counts and
+  updates registry and Git rows together, and each group carries its own
+  **Update N selected** action over the rows it holds.
+- **One phrasing for both groups**: "From NPM, N updatable" and "From GIT, N
+  updatable", instead of a count for one and a sentence for the other.
+- A Git install that fails to land is reinstalled from its spec once, so a
+  failed update cannot leave the profile without a plugin it just had.
 
 ### 0.1.5
 

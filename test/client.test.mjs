@@ -249,6 +249,20 @@ const rowCurrent = (name, version) => ({
   reason: null,
 })
 
+/** One row installed from Git whose repository moved ahead. */
+const rowGit = (name, from, to) => ({
+  name,
+  installedVersion: from,
+  installedAt: INSTALLED_AT,
+  enabled: true,
+  targetVersion: to,
+  registry: null,
+  state: 'git-updatable',
+  reason: 'git-updatable',
+  source: 'github:me/repo',
+  detail: 'https://github.com/me/repo',
+})
+
 /** One row the plugin cannot update, with the reason. */
 const rowBlocked = (name, version, reason) => ({
   name,
@@ -280,6 +294,7 @@ const idle = {
       rowUpdatable('dsh-context', '0.82.2', '0.83.0'),
       rowCurrent('dsh-free-search', '0.9.37'),
       rowBlocked('dsh-better-sidebar', '0.30.1', 'not-from-registry'),
+      rowGit('ds-harness-remote', '0.6.4', '0.6.5'),
     ],
     updatable: [],
     blocked: [{ name: 'dsh-better-sidebar', reason: 'not-from-registry' }],
@@ -394,7 +409,7 @@ assert.equal(
   'no shipped bundle name appears on the page',
 )
 assert.ok(idleHtml.includes('共 14 个自装插件'), 'the count is the user\'s own plugins')
-assert.ok(idleHtml.includes('有 2 个插件可以更新'), 'the notice states how many can move')
+assert.ok(idleHtml.includes('有 3 个插件可以更新'), 'the notice counts both channels')
 assert.ok(idleHtml.includes('type="checkbox"'), 'rows carry a checkbox')
 // The page states facts in the rows; the prose that explained the page to
 // itself was noise, and these lines keep it gone.
@@ -402,7 +417,17 @@ assert.ok(/安装于 \d{4}/.test(idleHtml), 'each row shows when its copy was in
 assert.equal(idleHtml.includes('只显示你自行安装的插件'), false, 'the self-note is gone')
 assert.equal(idleHtml.includes('只检查，不自动安装'), false, 'the autoApply suffix is gone')
 assert.equal(idleHtml.includes('内置管理器不会为它们'), false, 'the git group note is gone')
-assert.ok(idleHtml.includes('全部更新 (2)'), 'the button numbers the ticked rows')
+assert.ok(idleHtml.includes('全部更新 (3)'), 'the button numbers the ticked rows across both channels')
+// Both channels are updatable and share one selection; each group names itself
+// the same way and carries its own action.
+assert.ok(idleHtml.includes('从 NPM 安装，可更新 2 项'), 'the registry group counts its own rows')
+assert.ok(idleHtml.includes('从 GIT 安装，可更新 1 项'), 'the git group counts its own rows')
+assert.ok(idleHtml.includes('ds-harness-remote'), 'a git row is listed')
+assert.ok(idleHtml.includes('0.6.4 → 0.6.5'), 'a git row shows its version move like any other')
+// Each group carries its own action over the shared selection: NPM has 2
+// ticked rows, GIT has 1, and the toolbar covers all 3.
+assert.ok(idleHtml.includes('更新所选 2 项'), 'the NPM group acts on its own ticked rows')
+assert.ok(idleHtml.includes('更新所选 1 项'), 'the GIT group acts on its own ticked rows')
 
 // A finished run reports itself and its restart need.
 const finishedHtml = renderTab(finished)

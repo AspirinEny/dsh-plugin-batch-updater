@@ -526,12 +526,16 @@ export function apply(ctx, config) {
    */
   function updatableRows() {
     return state.plugins
-      .filter((row) => row.state === 'updatable')
+      .filter((row) => row.state === 'updatable' || row.state === 'git-updatable')
       .map((row) => ({
         name: row.name,
         installedVersion: row.installedVersion,
         targetVersion: row.targetVersion,
-        registry: row.registry,
+        registry: row.registry ?? null,
+        // `registry` items go through `updateBundle`; a Git source is removed
+        // and installed again, which is the only way the manager can move it.
+        git: row.state === 'git-updatable',
+        source: row.source ?? null,
       }))
   }
 
@@ -576,8 +580,8 @@ export function apply(ctx, config) {
    * Read a Git-installed plugin's repository version and build its row.
    *
    * `updateBundle` cannot replace this copy — it accepts a Git target only from a
-   * dependency pinned to a full commit — so the row never offers the batch, but
-   * it still says whether the repository moved ahead, and what to run instead.
+   * dependency pinned to a full commit — so a Git row is installed by the pair
+   * `removeBundle` + `installBundle`, which is what reinstalling it by hand does.
    *
    * @param bundle - one entry from `listBundles()`.
    * @param installedVersion - the version in place now.
@@ -600,11 +604,11 @@ export function apply(ctx, config) {
       ...base,
       state: newer ? 'git-updatable' : 'current',
       reason: newer ? 'git-updatable' : null,
-      // The page cannot install this one, so it shows the version and the
-      // repository instead of an Update button.
       targetVersion: newer ? head.version : null,
+      // Where it came from and how to install it again, which is all the row
+      // needs: it moves through `removeBundle` + `installBundle`.
+      source: typeof bundle.source === 'string' ? bundle.source : null,
       detail: repo.web,
-      spec: typeof bundle.source === 'string' ? bundle.source : null,
     }
   }
 
@@ -720,7 +724,14 @@ export function apply(ctx, config) {
     try {
       const options = { requestId }
       if (typeof item.registry === 'string' && item.registry !== '') options.registry = item.registry
-      const result = await manager.updateBundle(item.name, item.targetVersion, options)
+      // A Git copy has no `updateBundle` path: the manager accepts a Git target
+      // only from a dependency pinned to a full commit, and this one is not
+      // pinned. Removing it and installing the saved spec again is what a manual
+      // reinstall does, and `installBundle` already restores the profile files
+      // when the install fails.
+      const result = item.git === true
+        ? await reinstallFromGit(item)
+        : await manager.updateBundle(item.name, item.targetVersion, options)
       const detail = outcomeOf(result)
       run.results.push({
         name: item.name,
@@ -730,6 +741,8 @@ export function apply(ctx, config) {
         code: detail.code,
         step: detail.step,
         registry: item.registry ?? null,
+        git: item.git === true,
+        source: item.source ?? null,
         pendingBuilds: detail.pendingBuilds.length > 0 ? detail.pendingBuilds : undefined,
       })
     } catch (error) {
@@ -741,12 +754,49 @@ export function apply(ctx, config) {
         code: 'threw',
         detail: messageOf(error),
         registry: item.registry ?? null,
+        git: item.git === true,
+        source: item.source ?? null,
       })
     } finally {
       activeRequestId = null
       run.current = null
       settleRow(item, run)
     }
+  }
+
+  /**
+   * Replace a Git-installed bundle by removing it and installing its own spec.
+   *
+   * The removal is the risky half: a failed installation leaves nothing in place
+   * of the removed copy. `installBundle` restores `package.json` and the
+   * lockfile when *it* fails, so that covers a broken target, but a failure
+   * between the two calls would not. The old spec is therefore reinstalled
+   * explicitly when the install does not land.
+   *
+   * @param item - the queued Git entry, carrying the spec it was installed from.
+   * @returns a result shaped like `updateBundle`'s, so the page reports it alike.
+   */
+  async function reinstallFromGit(item) {
+    const source = typeof item.source === 'string' ? item.source : ''
+    if (source === '') throw new Error(`${item.name} has no saved Git spec to reinstall from`)
+    const removed = await manager.removeBundle(item.name)
+    if (removed?.application === 'failed' || removed?.application === 'cancelled') {
+      // Nothing was removed, so nothing was lost: report the removal's outcome.
+      return { from: item.installedVersion, to: item.targetVersion, step: 'remove', result: removed }
+    }
+    let installed
+    try {
+      installed = await manager.installBundle(source)
+    } catch (error) {
+      // Put the removed copy back before reporting, otherwise the profile is
+      // left without a plugin it had a moment ago.
+      await manager.installBundle(source).catch(() => undefined)
+      throw error
+    }
+    if (installed?.application === 'failed' || installed?.application === 'cancelled') {
+      await manager.installBundle(source).catch(() => undefined)
+    }
+    return { from: item.installedVersion, to: item.targetVersion, step: 'install', result: installed }
   }
 
   /**
@@ -792,7 +842,7 @@ export function apply(ctx, config) {
    * @param registry - the registry that answered the version lookup, if any.
    * @returns the batch record, or null when the name is not in the known list.
    */
-  async function runOne(name, target, installed, registry) {
+  async function runOne(name, target, installed, registry, git, source) {
     if (running !== null) return running
     if (manager === undefined) throw new Error('plugin manager is not available')
     const item = {
@@ -800,6 +850,8 @@ export function apply(ctx, config) {
       installedVersion: installed,
       targetVersion: target,
       registry: registry ?? null,
+      git: git === true,
+      source: source ?? null,
     }
     const run = {
       status: 'running',
@@ -948,7 +1000,7 @@ export function apply(ctx, config) {
       // queued: `updateBundle` needs a dependency pinned to a full commit.
       gitUpdatable: state.plugins
         .filter((row) => row.state === 'git-updatable')
-        .map((row) => ({ name: row.name, from: row.installedVersion, to: row.targetVersion, repo: row.detail ?? null, spec: row.spec ?? null })),
+        .map((row) => ({ name: row.name, from: row.installedVersion, to: row.targetVersion, repo: row.detail ?? null, source: row.source ?? null })),
       blocked: state.plugins
         .filter((row) => row.state === 'blocked')
         .map((row) => ({ name: row.name, reason: row.reason })),
@@ -1160,7 +1212,7 @@ export function apply(ctx, config) {
                 if (known === undefined) {
                   return reply({ ok: false, code: 'unknown-target', message: `${name}@${target} is not a checked target` })
                 }
-                await runOne(name, target, known.installedVersion, known.registry ?? null)
+                await runOne(name, target, known.installedVersion, known.registry ?? null, known.git, known.source)
                 return reply({ ...snapshot(), started: true })
               }
               if (action === 'retryFailed') {
@@ -1174,6 +1226,8 @@ export function apply(ctx, config) {
                   installedVersion: row.from,
                   targetVersion: row.to,
                   registry: row.registry ?? null,
+                  git: row.git === true,
+                  source: row.source ?? null,
                 }))
                 const run = startBatch(queue, 'retry')
                 if (run === null) return reply(snapshot())

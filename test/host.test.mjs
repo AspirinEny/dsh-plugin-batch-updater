@@ -181,6 +181,23 @@ function harness(bundles, versions, onUpdate, config = { intervalMinutes: 360 })
   return { ctx, manager }
 }
 
+/** Build a context around one explicit manager, so a stub can define its own methods. */
+function harnessWith(manager, config = { intervalMinutes: 360 }) {
+  const ctx = fakeContext({
+    pluginManager: manager,
+    connection: {
+      fetch: {
+        register: (route) => {
+          ctx.setHandler(route.path, route.fetch)
+          return async () => {}
+        },
+      },
+    },
+  })
+  apply(ctx, config)
+  return { ctx, manager }
+}
+
 /** A manager answer for one successful update. */
 function appliedChange(name = 'x') {
   return { from: '1.0.0', to: '2.0.0', step: 'install', result: { changed: true, application: 'applied', stage: 'install', target: name } }
@@ -317,9 +334,10 @@ test('still reads the retired updatable boolean', async () => {
   ctx.disposeAll()
 })
 
-test('reports a Git install whose repository moved ahead, without offering the batch', async () => {
-  // A Git copy cannot go through updateBundle — that needs a dependency pinned
-  // to a full commit — so the page reports the newer version and stays out of it.
+test('a Git install whose repository moved ahead joins the batch', async () => {
+  // updateBundle has no path for an unpinned Git spec, so the Host removes the
+  // copy and installs its saved spec again — the same two steps a manual
+  // reinstall takes — and the row is queued like any other.
   const bundles = [mineGit('from-git', '1.0.0'), mine('reg', '1.0.0')]
   stubRepo('me/repo', '1.2.0')
   const { ctx, manager } = harness(bundles, { reg: listed([versionRecord('2.0.0')]) })
@@ -329,10 +347,66 @@ test('reports a Git install whose repository moved ahead, without offering the b
   assert.equal(byName['from-git'].targetVersion, '1.2.0')
   assert.equal(state.gitUpdatable.length, 1)
   assert.equal(state.gitUpdatable[0].name, 'from-git')
-  // The batch must never include it: updateBundle would refuse the target.
-  assert.equal(state.updatable.length, 1)
-  assert.equal(state.updatable[0].name, 'reg')
+  // Both channels are updatable now, and the queue says which way each installs.
+  assert.equal(state.updatable.length, 2)
+  const queued = Object.fromEntries(state.updatable.map((item) => [item.name, item]))
+  assert.equal(queued['from-git'].git, true)
+  assert.equal(queued.reg.git, false)
+  // A Git row is still never asked for a registry version list.
   assert.equal(manager.calls.listVersions.includes('from-git'), false)
+  ctx.disposeAll()
+})
+
+test('a Git update removes the copy and installs its saved spec again', async () => {
+  const bundles = [mineGit('from-git', '1.0.0', { source: 'github:me/repo' })]
+  stubRepo('me/repo', '1.2.0')
+  const order = []
+  const manager = {
+    calls: { remove: [], install: [] },
+    async listBundles() { return bundles },
+    async listVersions() { return { status: 'refused', problem: 'not-updatable', reason: '', attempts: [] } },
+    async updateBundle() { throw new Error('a git row must not go through updateBundle') },
+    async removeBundle(name) { order.push('remove:' + name); this.calls.remove.push(name); return { changed: true, application: 'applied', stage: 'remove', target: name } },
+    async installBundle(spec) { order.push('install:' + spec); this.calls.install.push(spec); return { changed: true, application: 'applied', stage: 'install', target: spec } },
+    async cancelInstall() { return { status: 'not-running' } },
+  }
+  const { ctx } = harnessWith(manager)
+  await callRoute(ctx, { action: 'refresh' })
+  const started = await callRoute(ctx, { action: 'updateAll' })
+  assert.equal(started.started, true)
+  const settled = await settle(ctx, started)
+  assert.deepEqual(order, ['remove:from-git', 'install:github:me/repo'], 'removed first, then reinstalled from its own spec')
+  const row = settled.run.results.find((item) => item.name === 'from-git')
+  assert.equal(row.outcome, 'applied')
+  assert.equal(row.git, true, 'the result records which channel installed it')
+  ctx.disposeAll()
+})
+
+test('a Git update reinstalls the old copy when the new install fails', async () => {
+  // The removal already happened, so a failed install would leave the profile
+  // without a plugin it had a moment ago; the Host puts it back.
+  const bundles = [mineGit('from-git', '1.0.0', { source: 'github:me/repo' })]
+  stubRepo('me/repo', '1.2.0')
+  const installs = []
+  const manager = {
+    calls: { remove: [], install: [] },
+    async listBundles() { return bundles },
+    async listVersions() { return { status: 'refused', problem: 'not-updatable', reason: '', attempts: [] } },
+    async updateBundle() { throw new Error('a git row must not go through updateBundle') },
+    async removeBundle(name) { return { changed: true, application: 'applied', stage: 'remove', target: name } },
+    async installBundle(spec) {
+      installs.push(spec)
+      return { changed: false, application: 'failed', stage: 'install', target: spec, error: { code: 'operation-error' } }
+    },
+    async cancelInstall() { return { status: 'not-running' } },
+  }
+  const { ctx } = harnessWith(manager)
+  await callRoute(ctx, { action: 'refresh' })
+  const started = await callRoute(ctx, { action: 'updateAll' })
+  const settled = await settle(ctx, started)
+  assert.deepEqual(installs, ['github:me/repo', 'github:me/repo'], 'the failed install is retried once to restore the copy')
+  const row = settled.run.results.find((item) => item.name === 'from-git')
+  assert.equal(row.outcome, 'failed')
   ctx.disposeAll()
 })
 
