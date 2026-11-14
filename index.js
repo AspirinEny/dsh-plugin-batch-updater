@@ -243,11 +243,11 @@ function harnessHome() {
 function stampsFor(name, version, modulesRoot, history) {
   const onDisk = installedAtOf(modulesRoot, name)
   const record = history[name]
-  if (record === undefined) {
-    // First sighting: the copy landed at the directory time, and this page has
-    // never seen it replaced, so there is no update time to report.
-    return { installedAt: onDisk, updatedAt: null }
-  }
+  // The directory time is when pnpm last wrote this copy, which covers both an
+  // install and a later replacement: the one timestamp every package has. The
+  // recorded history stays as the fallback for a directory that cannot be read,
+  // and seeds the install date.
+  if (record === undefined) return { installedAt: onDisk, updatedAt: onDisk }
   const recordedVersion = typeof record.version === 'string' ? record.version : undefined
   if (recordedVersion !== undefined && recordedVersion !== version) {
     // The version changed since it was recorded: this copy is an update.
@@ -260,7 +260,9 @@ function stampsFor(name, version, modulesRoot, history) {
   // page said "上次更新" for plugins that had never been updated at all.
   return {
     installedAt: record.installedAt ?? onDisk,
-    updatedAt: record.updatedAt ?? null,
+    // The directory time is the last write, which covers both an install and a
+    // later replacement; it is the one stamp every package has.
+    updatedAt: onDisk ?? record.updatedAt ?? null,
   }
 }
 

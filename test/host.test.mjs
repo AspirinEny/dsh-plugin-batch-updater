@@ -536,7 +536,7 @@ test('the harness home is found without DSH_HOME in the environment', async () =
     const row = state.plugins.find((item) => item.name === 'anchored')
     // No environment at all: the directory time is still read, so nothing is unknown.
     assert.ok(Number.isFinite(row.installedAt), 'a stamp is read with no DSH_* variables set')
-    assert.equal(row.updatedAt, null, 'and no update time is invented')
+    assert.ok(Number.isFinite(row.updatedAt), 'the directory time stands in for the update too')
     ctx.disposeAll()
   } finally {
     process.env.DSH_HOME = savedHome
@@ -544,7 +544,7 @@ test('the harness home is found without DSH_HOME in the environment', async () =
   }
 })
 
-test('an unchanged package keeps one date instead of claiming an update', async () => {
+test('a package whose directory time is known always reports an update time', async () => {
   // The history already records this version, so nothing was replaced: the page
   // must keep showing the install date rather than inventing an update time.
   await stampPackage('a')
@@ -556,7 +556,7 @@ test('an unchanged package keeps one date instead of claiming an update', async 
   const state = await callRoute(again.ctx, { action: 'refresh' })
   const row = state.plugins.find((item) => item.name === 'a')
   assert.ok(Number.isFinite(row.installedAt), 'the install date survives a second check')
-  assert.equal(row.updatedAt, null, 'an unchanged copy reports no update time at all')
+  assert.ok(Number.isFinite(row.updatedAt), 'and the update line always has a value to show')
   again.ctx.disposeAll()
 })
 

@@ -183,6 +183,15 @@ layout, styling, or how the page actually looks.
 
 ## Changelog
 
+### 0.1.12
+
+- **Every row shows a time again.** The update line was fed only by what this
+  plugin had itself witnessed, so packages installed before it existed showed
+  nothing — twelve of thirteen rows were blank. It now uses the package
+  directory's own timestamp, which pnpm writes on install and again on every
+  replacement, so it exists for every package and names when the copy last
+  changed. The recorded history stays as a fallback.
+
 ### 0.1.11
 
 - **This plugin checks and updates itself.** It has its own row now, under the
