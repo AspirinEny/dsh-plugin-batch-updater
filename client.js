@@ -37,8 +37,9 @@ window.__ModuleLoader__.load({
       "updatableGroup": "从 NPM 安装，可更新 {count} 项",
       "currentGroup": "已是最新 {count}",
       "blockedCount": "无法自动更新 {count}",
-      "installedOn": "安装 {date}",
-      "updatedOn": "更新 {date}",
+      "installedLabel": "首次安装于：",
+      "updatedLabel": "上次更新于：",
+      "stampUnknown": "未知",
       "gitGroup": "从 GIT 安装，可更新 {count} 项",
       "gitUnreadable": "读不到这个仓库的版本信息",
       "gitUnsupportedHost": "只支持 GitHub / GitLab / Bitbucket 仓库",
@@ -105,8 +106,9 @@ window.__ModuleLoader__.load({
       "updatableGroup": "From NPM, {count} updatable",
       "currentGroup": "Up to date {count}",
       "blockedCount": "Cannot update automatically {count}",
-      "installedOn": "installed {date}",
-      "updatedOn": "updated {date}",
+      "installedLabel": "First installed:",
+      "updatedLabel": "Last updated:",
+      "stampUnknown": "unknown",
       "gitGroup": "From GIT, {count} updatable",
       "gitUnreadable": "Could not read this repository's version",
       "gitUnsupportedHost": "Only GitHub / GitLab / Bitbucket repositories are supported",
@@ -394,6 +396,16 @@ window.__ModuleLoader__.load({
 .bu-sub { font-family: inherit; font-size: 12px; font-weight: 400;
   color: var(--dsw-alias-label-secondary); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
+/* The two timestamps: one right-aligned column so the dates line up down the
+   list. A fixed width keeps the rows from shifting as the digits change. */
+.bu-stamps { flex: none; display: flex; flex-direction: column; gap: 2px;
+  margin-left: auto; text-align: right; }
+.bu-stamp { display: flex; justify-content: flex-end; gap: 6px;
+  font-size: 12px; line-height: 16px; white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+.bu-stampLabel { color: var(--dsw-alias-label-secondary); }
+.bu-stampValue { color: var(--dsw-alias-label-secondary);
+  font-family: inherit; font-variant-numeric: tabular-nums; }
 /* Version numbers read as ordinary text like every other row; only the inline
    code chips keep a monospace face. A second font family in a list of plugin
    names was the one thing that made the page look assembled from parts. */
@@ -505,15 +517,12 @@ window.__ModuleLoader__.load({
         : row.state === 'blocked'
           ? blockedText(row.reason, t)
           : row.installedVersion
+      // The two dates sit in their own right-aligned column, one line each, and
+      // always both: a copy that was never replaced still has a last-update
+      // time, which is its install time. Leaving the line out made the column
+      // jump from row to row.
       const installedOn = formatDate(row.installedAt)
       const updatedOn = formatDate(row.updatedAt)
-      // Both dates are shown when a copy was replaced at some point; when they
-      // coincide there is nothing to distinguish, so one line says it once.
-      const stamps = [
-        installedOn === '' ? null : fill(t('installedOn'), { date: installedOn }),
-        updatedOn === '' || updatedOn === installedOn ? null : fill(t('updatedOn'), { date: updatedOn }),
-      ].filter((part) => part !== null)
-      const detail = stamps.length === 0 ? versionText : `${versionText} · ${stamps.join(' · ')}`
 
       return h(
         'div',
@@ -539,7 +548,23 @@ window.__ModuleLoader__.load({
                 row.name,
               )
             : h('div', { className: 'bu-title' }, row.name),
-          h('div', { className: `bu-sub ${updatable ? 'bu-mono' : ''}`.trim() }, detail),
+          h('div', { className: `bu-sub ${updatable || gitUpdatable ? 'bu-mono' : ''}`.trim() }, versionText),
+        ),
+        h(
+          'div',
+          { className: 'bu-stamps' },
+          h(
+            'div',
+            { className: 'bu-stamp' },
+            h('span', { className: 'bu-stampLabel' }, t('installedLabel')),
+            h('span', { className: 'bu-stampValue' }, installedOn === '' ? t('stampUnknown') : installedOn),
+          ),
+          h(
+            'div',
+            { className: 'bu-stamp' },
+            h('span', { className: 'bu-stampLabel' }, t('updatedLabel')),
+            h('span', { className: 'bu-stampValue' }, updatedOn === '' ? t('stampUnknown') : updatedOn),
+          ),
         ),
         h(
           'div',

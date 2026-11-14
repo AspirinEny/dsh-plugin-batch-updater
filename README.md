@@ -183,6 +183,14 @@ layout, styling, or how the page actually looks.
 
 ## Changelog
 
+### 0.1.8
+
+- **The dates moved to their own right-aligned column.** They were appended to
+  the version line as small trailing text, where they were easy to miss; each
+  row now ends with two lines, "首次安装于：" and "上次更新于：", both in
+  `YYYY-MM-DD HH:mm:ss`. Both lines always show — a copy never replaced has one
+  timestamp standing for both — so the column does not jump between rows.
+
 ### 0.1.7
 
 - **Both dates, to the second.** Each row now shows when its copy was
