@@ -96,7 +96,8 @@ function mine(name, version, extra = {}) {
   return {
     name,
     version,
-    updatable: true,
+    // The field DSH 0.2.2-rc.2 and newer list: how `updateBundle` replaces it.
+    update: 'registry',
     installed: true,
     enabled: true,
     official: false,
@@ -107,12 +108,26 @@ function mine(name, version, extra = {}) {
   }
 }
 
+/** A plugin as an installation older than 0.2.2-rc.2 listed it: the retired boolean, no `update`. */
+function mineLegacy(name, version, extra = {}) {
+  const bundle = mine(name, version, extra)
+  delete bundle.update
+  // The retired field was true for a commit-pinned Git copy too, which the plugin
+  // has to tell apart by its source spec.
+  bundle.updatable = !/^(?:git\+|git:|file:|link:|https?:|github:)/i.test(String(bundle.source))
+  return bundle
+}
+
+/** A Git copy pinned to a commit, which only another commit of that repository can replace. */
+function mineGit(name, version, extra = {}) {
+  return mine(name, version, { update: 'git', source: 'github:me/repo#abc1234', ...extra })
+}
+
 /** A bundle the dsh installation ships. */
 function shipped(name, version) {
   return {
     name,
     version,
-    updatable: false,
     installed: false,
     enabled: true,
     official: true,
@@ -230,8 +245,9 @@ test('lists up-to-date plugins too, not just the ones that can move', async () =
 test('marks official and non-registry installs as blocked with a reason', async () => {
   const bundles = [
     mine('ok', '1.0.0'),
-    mine('from-git', '1.0.0', { updatable: false, source: 'github:me/repo#abc' }),
-    mine('from-path', '1.0.0', { updatable: false, source: 'link:../x' }),
+    mineGit('from-git', '1.0.0'),
+    mine('from-path', '1.0.0', { update: undefined, source: 'link:../x' }),
+    mine('from-ssh', '1.0.0', { update: 'git', source: 'git@github.com:me/repo.git' }),
   ]
   const { ctx } = harness(bundles, { ok: listed([versionRecord('2.0.0')]) })
   const state = await callRoute(ctx, { action: 'refresh' })
@@ -240,6 +256,44 @@ test('marks official and non-registry installs as blocked with a reason', async 
   assert.equal(byName['from-git'].reason, 'not-from-registry')
   assert.equal(byName['from-path'].state, 'blocked')
   assert.equal(byName['from-path'].reason, 'not-from-registry')
+  assert.equal(byName['from-ssh'].state, 'blocked', 'an scp-like Git address is not a registry range')
+  assert.equal(byName['from-ssh'].reason, 'not-from-registry')
+  ctx.disposeAll()
+})
+
+test('reads the update field DSH 0.2.2-rc.2 and newer list', async () => {
+  // The regression this guards: 0.2.2-rc.2 replaced `updatable: boolean` with
+  // `update: 'registry' | 'git'`, and reading only the old field left every
+  // registry plugin blocked, so the page reported nothing to update.
+  const bundles = [mine('a', '1.0.0'), mine('b', '1.0.0')]
+  const { ctx } = harness(bundles, {
+    a: listed([versionRecord('2.0.0')]),
+    b: listed([]),
+  })
+  const state = await callRoute(ctx, { action: 'refresh' })
+  const byName = Object.fromEntries(state.plugins.map((row) => [row.name, row]))
+  assert.equal(byName.a.state, 'updatable', 'a registry bundle listed with update: registry can move')
+  assert.equal(byName.a.targetVersion, '2.0.0')
+  assert.equal(byName.b.state, 'current')
+  assert.equal(state.updatable.length, 1)
+  ctx.disposeAll()
+})
+
+test('still reads the retired updatable boolean', async () => {
+  const bundles = [
+    mineLegacy('a', '1.0.0'),
+    mineLegacy('b', '1.0.0', { source: 'github:me/repo#abc' }),
+    mineLegacy('c', '1.0.0', { source: 'git@github.com:me/repo.git' }),
+  ]
+  const { ctx } = harness(bundles, { a: listed([versionRecord('2.0.0')]) })
+  const state = await callRoute(ctx, { action: 'refresh' })
+  const byName = Object.fromEntries(state.plugins.map((row) => [row.name, row]))
+  assert.equal(byName.a.state, 'updatable', 'an older installation still lists updatable: true')
+  assert.equal(byName.a.targetVersion, '2.0.0')
+  assert.equal(byName.b.state, 'blocked', 'the retired boolean was true for Git copies too')
+  assert.equal(byName.b.reason, 'not-from-registry')
+  assert.equal(byName.c.state, 'blocked', 'an scp-like Git address is not a registry range')
+  assert.equal(byName.c.reason, 'not-from-registry')
   ctx.disposeAll()
 })
 

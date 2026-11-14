@@ -1,6 +1,6 @@
 {
   "name": "dsh-batch-updater",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Adds an Updates tab to the DeepSeek Harness Plugins page: checks the plugins you installed yourself on a schedule, then updates the ones you tick.",
   "license": "MIT",
   "type": "module",

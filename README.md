@@ -84,7 +84,8 @@ The Host half (`index.js`) is a Cordis plugin with two passes over
 `ctx.pluginManager`:
 
 ```
-check:  listBundles()  ->  the bundles with availability 'profile' and not official
+check:  listBundles()  ->  the bundles with availability 'profile', not
+                           official, and update 'registry'
                        ->  listVersions(name) for each
                        ->  the newest version that declares a bundle, is not
                            deprecated, accepts this DSH, and is not a prerelease
@@ -147,6 +148,20 @@ layout, styling, or how the page actually looks.
   then update again.
 
 ## Changelog
+
+### 0.1.3
+
+- **Fix: nothing was listed as updatable on DSH 0.2.2-rc.2 and newer.** That
+  release replaced the boolean `listBundles()[].updatable` with
+  `update: 'registry' | 'git'`. The check still read the retired field, which is
+  now always absent, so every registry plugin was filed under "cannot update
+  automatically" and the page never offered anything. Both fields are read now,
+  so installations on either side of the rename work.
+- A Git copy (`update: 'git'`) is reported as not registry-installed, which is
+  what it is: it moves only to another pinned commit of its own repository, and
+  this page cannot produce one.
+- An scp-like Git address (`git@host:owner/repo`) is recognised as a Git spec.
+  It was previously read as if it were a registry range.
 
 ### 0.1.2
 

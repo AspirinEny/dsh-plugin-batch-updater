@@ -3,7 +3,7 @@
  *
  * Two jobs, both over `ctx.pluginManager`:
  *
- *  1. Check: `listBundles()` -> the bundles the manager marks `updatable` ->
+ *  1. Check: `listBundles()` -> the bundles the manager marks `update: 'registry'` ->
  *     `listVersions()` for each of them -> the newest version that can actually
  *     be installed here (declares a bundle, is not deprecated, does not need a
  *     newer DSH, and is not a prerelease unless asked for).
@@ -50,6 +50,8 @@ const BOOT_CHECK_DELAY_MS = 12_000
 
 /** A source spec that is not a registry range, so `updateBundle` cannot replace it. */
 const NON_REGISTRY_SPEC = /^(?:git\+|git:|file:|link:|https?:|github:|workspace:|portal:)/i
+/** An scp-like Git address such as `git@github.com:me/repo`, which `NON_REGISTRY_SPEC` does not cover. */
+const GIT_SSH_SPEC = /^[\w.-]+@[\w.-]+:/
 
 /**
  * Build the row's schema, or null when schemastery cannot be reached.
@@ -208,12 +210,23 @@ function skipReasonFor(bundle, cfg) {
   if (name === '') return 'unreadable'
   if (name === SELF_NAME) return 'self'
   if (cfg().skip.includes(name)) return 'skipped-by-config'
-  // The manager itself already answers false for git, path, tarball and
-  // installation-provided bundles; these checks keep the reason visible.
-  if (bundle.updatable !== true) {
+  // DSH 0.2.2-rc.2 replaced `updatable: boolean` with `update: 'registry' | 'git'`.
+  // Reading only the old field made every registry plugin look not-updatable, so
+  // the page found nothing to update against 0.2.2-rc.2 and newer. Both are read.
+  const source = typeof bundle.source === 'string' ? bundle.source.trim() : ''
+  const updateKind =
+    typeof bundle.update === 'string'
+      ? bundle.update
+      : // The retired boolean, which was also true for the Git copies it covered.
+        bundle.updatable === true && !NON_REGISTRY_SPEC.test(source) && !GIT_SSH_SPEC.test(source)
+        ? 'registry'
+        : undefined
+  // A Git copy updates only to another pinned commit of its own repository, which
+  // this page cannot produce, so it belongs with the non-registry installs.
+  if (updateKind !== 'registry') {
     if (bundle.official === true) return 'official'
-    const source = typeof bundle.source === 'string' ? bundle.source.trim() : ''
-    if (source !== '' && NON_REGISTRY_SPEC.test(source)) return 'not-from-registry'
+    if (source !== '' && (NON_REGISTRY_SPEC.test(source) || GIT_SSH_SPEC.test(source))) return 'not-from-registry'
+    if (updateKind === 'git') return 'not-from-registry'
     return 'not-updatable'
   }
   if (bundle.official === true) return 'official'
