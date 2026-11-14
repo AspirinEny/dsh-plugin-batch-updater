@@ -300,6 +300,7 @@ const idle = {
       rowGit('ds-harness-remote', '0.6.4', '0.6.5'),
       // Installed once, then replaced: both dates must appear.
       { ...rowCurrent('dsh-whale-widget', '0.4.2'), installedAt: INSTALLED_AT, updatedAt: UPDATED_AT },
+      // Installed and never replaced: no update line may appear for it.
     ],
     updatable: [],
     blocked: [{ name: 'dsh-better-sidebar', reason: 'not-from-registry' }],
@@ -421,8 +422,17 @@ assert.ok(idleHtml.includes('type="checkbox"'), 'rows carry a checkbox')
 // Both dates, in their own right-aligned column, one line each.
 assert.ok(/首次安装于：<\/span><span[^>]*>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(idleHtml),
   'each row shows its install time to the second')
-assert.ok(/上次更新于：<\/span><span[^>]*>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(idleHtml),
-  'and the last update time, on its own line')
+assert.ok(/上次更新：<\/span><span[^>]*>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(idleHtml),
+  'a replaced copy shows its last update time, on its own line')
+// A copy that was only ever installed must not claim an update.
+const plainRowHtml = (() => {
+  const withoutUpdate = {
+    loading: false, dismissedRunAt: null, error: null,
+    data: { ...idle.data, plugins: [{ ...rowCurrent('only-installed', '1.0.0'), updatedAt: null }] },
+  }
+  return renderTab(withoutUpdate)
+})()
+assert.equal(plainRowHtml.includes('上次更新'), false, 'no update line for a copy that was never updated')
 assert.equal(idleHtml.includes('只显示你自行安装的插件'), false, 'the self-note is gone')
 assert.equal(idleHtml.includes('只检查，不自动安装'), false, 'the autoApply suffix is gone')
 assert.equal(idleHtml.includes('内置管理器不会为它们'), false, 'the git group note is gone')

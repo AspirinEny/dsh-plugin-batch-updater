@@ -38,8 +38,7 @@ window.__ModuleLoader__.load({
       "currentGroup": "已是最新 {count} 项",
       "blockedCount": "无法自动更新 {count} 项",
       "installedLabel": "首次安装于：",
-      "updatedLabel": "上次更新于：",
-      "stampUnknown": "未知",
+      "updatedLabel": "上次更新：",
       "gitGroup": "从 GIT 安装，可更新 {count} 项",
       "gitUnreadable": "读不到这个仓库的版本信息",
       "gitUnsupportedHost": "只支持 GitHub / GitLab / Bitbucket 仓库",
@@ -108,7 +107,6 @@ window.__ModuleLoader__.load({
       "blockedCount": "Cannot update automatically: {count}",
       "installedLabel": "First installed:",
       "updatedLabel": "Last updated:",
-      "stampUnknown": "unknown",
       "gitGroup": "From GIT, {count} updatable",
       "gitUnreadable": "Could not read this repository's version",
       "gitUnsupportedHost": "Only GitHub / GitLab / Bitbucket repositories are supported",
@@ -559,12 +557,17 @@ window.__ModuleLoader__.load({
             h('span', { className: 'bu-stampLabel' }, t('installedLabel')),
             h('span', { className: 'bu-stampValue' }, installedOn === '' ? t('stampUnknown') : installedOn),
           ),
-          h(
-            'div',
-            { className: 'bu-stamp' },
-            h('span', { className: 'bu-stampLabel' }, t('updatedLabel')),
-            h('span', { className: 'bu-stampValue' }, updatedOn === '' ? t('stampUnknown') : updatedOn),
-          ),
+          // Only a copy this page actually saw being replaced gets an update
+          // line. Repeating the install time here told every user that every
+          // plugin had been updated, which was never true.
+          updatedOn === ''
+            ? null
+            : h(
+                'div',
+                { className: 'bu-stamp' },
+                h('span', { className: 'bu-stampLabel' }, t('updatedLabel')),
+                h('span', { className: 'bu-stampValue' }, updatedOn),
+              ),
         ),
         h(
           'div',

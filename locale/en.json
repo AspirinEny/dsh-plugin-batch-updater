@@ -25,7 +25,6 @@
   "blockedCount": "Cannot update automatically: {count}",
   "installedLabel": "First installed:",
   "updatedLabel": "Last updated:",
-  "stampUnknown": "unknown",
   "gitGroup": "From GIT, {count} updatable",
   "gitUnreadable": "Could not read this repository's version",
   "gitUnsupportedHost": "Only GitHub / GitLab / Bitbucket repositories are supported",

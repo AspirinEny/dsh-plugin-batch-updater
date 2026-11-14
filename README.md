@@ -183,6 +183,20 @@ layout, styling, or how the page actually looks.
 
 ## Changelog
 
+### 0.1.10
+
+- **Fix: every plugin showed the same install and update time.** The update date
+  fell back to the install date when no update had been recorded, so a copy that
+  was only ever installed claimed to have been "updated" at exactly the moment
+  it was installed. The update line is now shown only when a replacement was
+  actually recorded, and a fresh profile shows the install date alone.
+- **Fix: a Git row could stick at "网络异常" for the whole session.** The first
+  scheduled check runs moments after startup, when the network may not be up
+  yet; one failed read was remembered until the app restarted. The read is
+  retried once, and a persistent failure now carries the underlying reason
+  (DNS, timeout, refused) instead of the bare word "network".
+- The second line reads **上次更新：** rather than 上次更新于：.
+
 ### 0.1.9
 
 - **Fix: every date showed as "未知".** The history file was placed one level

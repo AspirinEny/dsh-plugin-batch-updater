@@ -30,10 +30,12 @@ process.env.DSH_PROFILE_DIR = scratchProfile
 // The plugin reads a Git repository's `package.json` over HTTP. Tests answer
 // from this table instead, so a fixture never reaches the network.
 const gitAnswers = new Map()
-__setFetchText(async (url) => {
+/** The default reader: answers from the table, 404 for anything unset. */
+const fetchTextStub = async (url) => {
   const answer = gitAnswers.get(url)
   return answer ?? { status: 404, text: '' }
-})
+}
+__setFetchText(fetchTextStub)
 
 /**
  * Build a fake Cordis context that records what the plugin registered.
@@ -478,6 +480,47 @@ test('a non-forge host is reported as unsupported rather than checked', async ()
   ctx.disposeAll()
 })
 
+test('one transient metadata failure is retried, not reported as a network row', async () => {
+  // The scheduled check runs moments after startup, when a machine's network is
+  // often not ready; a single blip used to pin the row to "network" all session.
+  const bundles = [mineGit('from-git', '1.0.0')]
+  let calls = 0
+  const realFetch = fetchTextStub
+  __setFetchText(async (url) => {
+    calls += 1
+    if (calls === 1) throw new Error('ECONNRESET once')
+    return { status: 200, text: JSON.stringify({ name: 'repo', version: '1.2.0' }) }
+  })
+  try {
+    const { ctx } = harness(bundles, {})
+    const state = await callRoute(ctx, { action: 'refresh' })
+    const row = state.plugins.find((item) => item.name === 'from-git')
+    assert.equal(calls, 2, 'the read was attempted twice')
+    assert.equal(row.state, 'git-updatable', 'the retry recovered the row')
+    assert.equal(row.targetVersion, '1.2.0')
+    ctx.disposeAll()
+  } finally {
+    __setFetchText(realFetch)
+  }
+})
+
+test('a persistent metadata failure reports its reason, not just "network"', async () => {
+  const bundles = [mineGit('from-git', '1.0.0')]
+  const realFetch = fetchTextStub
+  __setFetchText(async () => { throw new Error('getaddrinfo ENOTFOUND raw.githubusercontent.com') })
+  try {
+    const { ctx } = harness(bundles, {})
+    const state = await callRoute(ctx, { action: 'refresh' })
+    const row = state.plugins.find((item) => item.name === 'from-git')
+    assert.equal(row.state, 'blocked')
+    assert.equal(row.reason, 'network')
+    assert.match(String(row.message), /ENOTFOUND/, 'the underlying cause is carried to the page')
+    ctx.disposeAll()
+  } finally {
+    __setFetchText(realFetch)
+  }
+})
+
 test('the harness home is found without DSH_HOME in the environment', async () => {
   // The Desktop Host does not pass DSH_HOME to plugin code. The history file was
   // therefore written one level too high, every read came back empty, and the
@@ -493,7 +536,7 @@ test('the harness home is found without DSH_HOME in the environment', async () =
     const row = state.plugins.find((item) => item.name === 'anchored')
     // No environment at all: the directory time is still read, so nothing is unknown.
     assert.ok(Number.isFinite(row.installedAt), 'a stamp is read with no DSH_* variables set')
-    assert.equal(row.updatedAt, row.installedAt)
+    assert.equal(row.updatedAt, null, 'and no update time is invented')
     ctx.disposeAll()
   } finally {
     process.env.DSH_HOME = savedHome
@@ -513,7 +556,7 @@ test('an unchanged package keeps one date instead of claiming an update', async 
   const state = await callRoute(again.ctx, { action: 'refresh' })
   const row = state.plugins.find((item) => item.name === 'a')
   assert.ok(Number.isFinite(row.installedAt), 'the install date survives a second check')
-  assert.equal(row.updatedAt, row.installedAt, 'an unchanged copy has not been updated')
+  assert.equal(row.updatedAt, null, 'an unchanged copy reports no update time at all')
   again.ctx.disposeAll()
 })
 

@@ -110,6 +110,30 @@ async function httpFetch(url) {
   return { status: answer.status, text: await answer.text() }
 }
 
+/**
+ * Read a URL, retrying once.
+ *
+ * The scheduled check runs moments after the app starts, which is exactly when
+ * a machine's network is still coming up. A single blip used to turn a Git row
+ * into a permanent "network" row for the whole session; one retry separates a
+ * startup hiccup from a real outage.
+ *
+ * @param url - the address to read.
+ * @returns the status and the body, or throws with the last failure.
+ */
+async function readWithRetry(url) {
+  let lastError
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 600))
+    try {
+      return await fetchText(url)
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError
+}
+
 /** Replace the reader; tests use this, the Host never calls it. */
 export function __setFetchText(next) {
   fetchText = typeof next === 'function' ? next : (url) => httpFetch(url)
@@ -208,9 +232,9 @@ function stampsFor(name, version, modulesRoot, history) {
   const onDisk = installedAtOf(modulesRoot, name)
   const record = history[name]
   if (record === undefined) {
-    // First sighting: the copy landed at the directory time and has not been
-    // replaced since, so the two dates are the same.
-    return { installedAt: onDisk, updatedAt: onDisk }
+    // First sighting: the copy landed at the directory time, and this page has
+    // never seen it replaced, so there is no update time to report.
+    return { installedAt: onDisk, updatedAt: null }
   }
   const recordedVersion = typeof record.version === 'string' ? record.version : undefined
   if (recordedVersion !== undefined && recordedVersion !== version) {
@@ -218,13 +242,13 @@ function stampsFor(name, version, modulesRoot, history) {
     const when = onDisk ?? Date.now()
     return { installedAt: record.installedAt ?? when, updatedAt: when }
   }
-  // No recorded update yet: the copy is still the one that was installed, so
-  // the update date is the install date and the page shows one date instead of
-  // claiming it was updated at an unknown time.
-  const installedAt = record.installedAt ?? onDisk
+  // No recorded update: this copy is still the one that was installed. Reporting
+  // the install time again as an update time would claim an update that never
+  // happened, and every plugin then showed the same two dates — the reason the
+  // page said "上次更新" for plugins that had never been updated at all.
   return {
-    installedAt,
-    updatedAt: record.updatedAt ?? installedAt,
+    installedAt: record.installedAt ?? onDisk,
+    updatedAt: record.updatedAt ?? null,
   }
 }
 
@@ -372,7 +396,7 @@ function gitSourceOf(source) {
  * @param read - performs the HTTP request; injected so tests can answer.
  * @returns the manifest version, or a small reason the read did not answer.
  */
-async function readHeadVersion(source, read) {
+async function readHeadVersion(source, readRound) {
   const repo = gitSourceOf(source)
   if (repo === null) return { kind: 'unsupported' }
   if (repo.host !== 'github.com' && repo.host !== 'gitlab.com' && repo.host !== 'bitbucket.org') {
@@ -385,7 +409,7 @@ async function readHeadVersion(source, read) {
       ? `https://gitlab.com/${repo.owner}/${repo.repo}/-/raw/HEAD/package.json`
       : `https://bitbucket.org/${repo.owner}/${repo.repo}/raw/HEAD/package.json`
   try {
-    const answer = await read(path)
+    const answer = await readRound(path)
     if (answer.status < 200 || answer.status >= 300) return { kind: 'not-found', status: answer.status }
     const manifest = JSON.parse(answer.text)
     if (typeof manifest?.version !== 'string' || manifest.version.trim() === '') return { kind: 'not-found' }
@@ -806,10 +830,14 @@ export function apply(ctx, config) {
     if (settings.skip.includes(bundle.name)) return { ...base, state: 'blocked', reason: 'skipped-by-config' }
     const repo = gitSourceOf(bundle.source)
     if (repo === null) return { ...base, state: 'blocked', reason: 'git-unreadable' }
-    const head = await readHeadVersion(bundle.source, fetchText)
+    const head = await readHeadVersion(bundle.source, readWithRetry)
     if (head.kind === 'unsupported') return { ...base, state: 'blocked', reason: 'git-unsupported-host', detail: repo.web }
     if (head.kind === 'not-found') return { ...base, state: 'blocked', reason: 'git-not-found', detail: repo.web }
-    if (head.kind === 'network') return { ...base, state: 'blocked', reason: 'network', detail: repo.web }
+    // A read that failed for a reason other than the network says so: DNS,
+    // a timeout and a refused connection are different things to act on.
+    if (head.kind === 'network') {
+      return { ...base, state: 'blocked', reason: 'network', detail: repo.web, message: head.message }
+    }
     if (head.kind !== 'version') return { ...base, state: 'blocked', reason: 'git-unreadable', detail: repo.web }
     const newer = compareVersions(head.version, installedVersion) > 0
     return {
