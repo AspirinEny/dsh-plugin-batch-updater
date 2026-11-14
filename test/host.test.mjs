@@ -11,13 +11,16 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, __setFetchText } from '../index.js'
+import { apply, __setFetchText, __setRoots } from '../index.js'
 
 // The plugin records install/update times under the harness home. Give the run
 // a scratch home so tests never read or write a real profile's history, and so
 // one test cannot see another's records.
 const scratchHome = await mkdtemp(join(tmpdir(), 'dsh-batch-updater-test-'))
 process.env.DSH_HOME = scratchHome
+// A checkout has no `profiles` segment, so pin the anchors the plugin would
+// otherwise derive from its own install path.
+__setRoots(scratchHome, join(scratchHome, 'profile', 'node_modules'))
 // A scratch profile directory too: the install date is read from the package
 // directory inside it, so a test that cares about it creates that directory.
 const scratchProfile = join(scratchHome, 'profile')
@@ -473,6 +476,29 @@ test('a non-forge host is reported as unsupported rather than checked', async ()
   assert.equal(row.state, 'blocked')
   assert.equal(row.reason, 'git-unsupported-host')
   ctx.disposeAll()
+})
+
+test('the harness home is found without DSH_HOME in the environment', async () => {
+  // The Desktop Host does not pass DSH_HOME to plugin code. The history file was
+  // therefore written one level too high, every read came back empty, and the
+  // page showed every date as unknown. The plugin's own path is the anchor.
+  const savedHome = process.env.DSH_HOME
+  const savedProfile = process.env.DSH_PROFILE_DIR
+  delete process.env.DSH_HOME
+  delete process.env.DSH_PROFILE_DIR
+  try {
+    await stampPackage('anchored')
+    const { ctx } = harness([mine('anchored', '1.0.0')], { anchored: listed([]) })
+    const state = await callRoute(ctx, { action: 'refresh' })
+    const row = state.plugins.find((item) => item.name === 'anchored')
+    // No environment at all: the directory time is still read, so nothing is unknown.
+    assert.ok(Number.isFinite(row.installedAt), 'a stamp is read with no DSH_* variables set')
+    assert.equal(row.updatedAt, row.installedAt)
+    ctx.disposeAll()
+  } finally {
+    process.env.DSH_HOME = savedHome
+    process.env.DSH_PROFILE_DIR = savedProfile
+  }
 })
 
 test('an unchanged package keeps one date instead of claiming an update', async () => {

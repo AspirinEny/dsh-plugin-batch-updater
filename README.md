@@ -183,6 +183,18 @@ layout, styling, or how the page actually looks.
 
 ## Changelog
 
+### 0.1.9
+
+- **Fix: every date showed as "未知".** The history file was placed one level
+  too high — `<home>/profiles/storages/...` instead of `<home>/storages/...` —
+  because the Desktop Host does not pass `DSH_HOME` to plugin code, and the
+  fallback took the profile directory's parent (which is `profiles`, not the
+  home). The plugin now anchors on its own install path
+  (`<home>/profiles/<name>/node_modules/<package>`), which needs no environment
+  variable at all.
+- The group headings all count items the same way: "从 NPM 安装，可更新 N 项",
+  "从 GIT 安装，可更新 N 项", "已是最新 N 项", "无法自动更新 N 项".
+
 ### 0.1.8
 
 - **The dates moved to their own right-aligned column.** They were appended to

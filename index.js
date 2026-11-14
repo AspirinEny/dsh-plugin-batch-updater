@@ -18,8 +18,9 @@
  */
 
 import { createRequire } from 'node:module'
+import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 
 export const name = 'dsh-batch-updater'
@@ -68,6 +69,27 @@ const GIT_FORGE = /^(?:(github|gitlab|bitbucket|gist):([^/#]+)\/([^/#]+?)|(?:git
 const GIT_METADATA_TIMEOUT_MS = 8_000
 
 /**
+ * Anchors a test can pin.
+ *
+ * The Host never sets these. They exist because a source checkout has no
+ * `profiles` segment in its path, so the production anchors below cannot place
+ * it in a harness home; a test that deletes the environment must still be able
+ * to say where its scratch profile lives.
+ */
+let homeOverride = null
+let modulesDirOverride = null
+
+/**
+ * Pin both anchors.
+ * @param home - the harness home, or null to use the environment.
+ * @param modulesDir - the profile's node_modules, or null to use the environment.
+ */
+export function __setRoots(home, modulesDir) {
+  homeOverride = typeof home === 'string' && home !== '' ? home : null
+  modulesDirOverride = typeof modulesDir === 'string' && modulesDir !== '' ? modulesDir : null
+}
+
+/**
  * The HTTP reader `readHeadVersion` uses.
  *
  * A module-level binding so a test can answer without a network, and so the one
@@ -98,9 +120,14 @@ export function __setFetchText(next) {
  * @returns the absolute directory, or null when the Host names no profile.
  */
 function profileModulesDir() {
-  const profileDir = process.env.DSH_PROFILE_DIR
-  if (typeof profileDir !== 'string' || profileDir === '') return null
-  return join(profileDir, 'node_modules')
+  if (modulesDirOverride !== null) return modulesDirOverride
+  const fromEnv = process.env.DSH_PROFILE_DIR
+  if (typeof fromEnv === 'string' && fromEnv !== '') return join(fromEnv, 'node_modules')
+  // No profile in the environment: this file sits inside that profile's own
+  // node_modules, so its directory is the answer.
+  const own = dirname(fileURLToPath(import.meta.url))
+  if (own.indexOf(`${sep}node_modules${sep}`) > 0) return own.slice(0, own.indexOf(`${sep}node_modules${sep}`) + `${sep}node_modules`.length)
+  return null
 }
 
 /**
@@ -119,13 +146,45 @@ function profileModulesDir() {
  * @returns the record path, or null when the Host names no profile.
  */
 function historyFile() {
-  const home = process.env.DSH_HOME
-  const profileDir = process.env.DSH_PROFILE_DIR
-  if (typeof profileDir !== 'string' || profileDir === '') return null
-  // DSH_HOME is the harness home; fall back to the profile's parent when it is
-  // absent, which keeps the file under the same tree either way.
-  const base = typeof home === 'string' && home !== '' ? home : dirname(profileDir)
+  const base = harnessHome()
+  if (base === null) return null
   return join(base, 'storages', SELF_NAME, 'history.json')
+}
+
+/**
+ * The harness home directory, where `storages` lives.
+ *
+ * The Host may run the plugin without `DSH_HOME` in its environment — the
+ * Desktop app does — so the profile directory is the reliable anchor: it is
+ * `<home>/profiles/<name>`, one level below the home. Falling back to
+ * `homedir()/.dsh` covers a Host that names neither.
+ *
+ * @returns the absolute directory, or null when neither anchor is available.
+ */
+function harnessHome() {
+  if (homeOverride !== null) return homeOverride
+  const fromEnv = process.env.DSH_HOME
+  if (typeof fromEnv === 'string' && fromEnv !== '') return fromEnv
+  // The most reliable anchor is this file: it is installed at
+  // <home>/profiles/<name>/node_modules/<package>/index.js, so the segment
+  // before "profiles" is the home. The Desktop Host does not pass DSH_HOME to
+  // plugin code, which is why the environment alone was not enough.
+  const own = dirname(fileURLToPath(import.meta.url))
+  const marker = `${sep}profiles${sep}`
+  const cut = own.indexOf(marker)
+  if (cut > 0) return own.slice(0, cut)
+  // A symlinked checkout has no "profiles" segment; the profile directory the
+  // Host names is the next best anchor, one level below the home.
+  const profileDir = process.env.DSH_PROFILE_DIR
+  if (typeof profileDir === 'string' && profileDir !== '') {
+    const candidate = dirname(dirname(profileDir))
+    if (candidate !== '' && candidate !== profileDir) return candidate
+  }
+  try {
+    return join(homedir(), '.dsh')
+  } catch {
+    return null
+  }
 }
 
 /**
