@@ -183,6 +183,21 @@ layout, styling, or how the page actually looks.
 
 ## Changelog
 
+### 0.1.7
+
+- **Both dates, to the second.** Each row now shows when its copy was
+  installed and — once it has been replaced — when that happened, as
+  `YYYY-MM-DD HH:mm:ss` (the earlier release showed a bare install date with no
+  time). A copy that was installed and never touched shows one date.
+- The install date comes from the package directory's own timestamp. The update
+  date cannot: `pnpm` moves that timestamp on every reinstall, so after one
+  update it can no longer say when the package first arrived. The plugin
+  therefore keeps a small record of what it has seen under
+  `<dsh home>/storages/dsh-batch-updater/history.json` and compares versions
+  between checks; a package the record has never seen takes its directory time
+  for both. The record is best-effort — a profile that cannot write it still
+  shows install dates.
+
 ### 0.1.6
 
 - **Git installs update in place now.** They were reported but not queued, on

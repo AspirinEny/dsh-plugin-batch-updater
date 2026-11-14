@@ -249,6 +249,9 @@ const rowCurrent = (name, version) => ({
   reason: null,
 })
 
+/** One row that was installed earlier and replaced later. */
+const UPDATED_AT = INSTALLED_AT + 3 * 24 * 60 * 60 * 1000
+
 /** One row installed from Git whose repository moved ahead. */
 const rowGit = (name, from, to) => ({
   name,
@@ -295,6 +298,8 @@ const idle = {
       rowCurrent('dsh-free-search', '0.9.37'),
       rowBlocked('dsh-better-sidebar', '0.30.1', 'not-from-registry'),
       rowGit('ds-harness-remote', '0.6.4', '0.6.5'),
+      // Installed once, then replaced: both dates must appear.
+      { ...rowCurrent('dsh-whale-widget', '0.4.2'), installedAt: INSTALLED_AT, updatedAt: UPDATED_AT },
     ],
     updatable: [],
     blocked: [{ name: 'dsh-better-sidebar', reason: 'not-from-registry' }],
@@ -413,7 +418,9 @@ assert.ok(idleHtml.includes('有 3 个插件可以更新'), 'the notice counts b
 assert.ok(idleHtml.includes('type="checkbox"'), 'rows carry a checkbox')
 // The page states facts in the rows; the prose that explained the page to
 // itself was noise, and these lines keep it gone.
-assert.ok(/安装于 \d{4}/.test(idleHtml), 'each row shows when its copy was installed')
+// The full timestamp, to the second: "安装 2026/11/09 12:00:00".
+assert.ok(/安装 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(idleHtml), 'each row shows its install time to the second')
+assert.ok(/更新 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(idleHtml), 'a replaced copy also shows when it was updated')
 assert.equal(idleHtml.includes('只显示你自行安装的插件'), false, 'the self-note is gone')
 assert.equal(idleHtml.includes('只检查，不自动安装'), false, 'the autoApply suffix is gone')
 assert.equal(idleHtml.includes('内置管理器不会为它们'), false, 'the git group note is gone')

@@ -8,7 +8,21 @@
  * failure does not stop the queue, and that a ticked selection is honoured.
  */
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { apply, __setFetchText } from '../index.js'
+
+// The plugin records install/update times under the harness home. Give the run
+// a scratch home so tests never read or write a real profile's history, and so
+// one test cannot see another's records.
+const scratchHome = await mkdtemp(join(tmpdir(), 'dsh-batch-updater-test-'))
+process.env.DSH_HOME = scratchHome
+// A scratch profile directory too: the install date is read from the package
+// directory inside it, so a test that cares about it creates that directory.
+const scratchProfile = join(scratchHome, 'profile')
+await mkdir(join(scratchProfile, 'node_modules'), { recursive: true })
+process.env.DSH_PROFILE_DIR = scratchProfile
 
 // The plugin reads a Git repository's `package.json` over HTTP. Tests answer
 // from this table instead, so a fixture never reaches the network.
@@ -236,7 +250,25 @@ async function settle(ctx, state, limit = 200) {
 
 const tests = []
 /** Wrap a test so every case starts with an empty repository table. */
-const test = (name, fn) => tests.push({ name, fn: async () => { gitAnswers.clear(); return fn() } })
+const historyPath = join(scratchHome, 'storages', 'dsh-batch-updater', 'history.json')
+const modulesDir = join(scratchProfile, 'node_modules')
+
+/** Create a package directory, so the install date has something to read. */
+const stampPackage = async (name) => {
+  const dir = join(modulesDir, name)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'package.json'), JSON.stringify({ name, version: '0.0.0' }))
+}
+
+const test = (name, fn) => tests.push({ name, fn: async () => {
+  gitAnswers.clear()
+  // Every case starts with no record, no remembered install time and no
+  // package directories left by the previous case.
+  await rm(historyPath, { force: true })
+  await rm(modulesDir, { recursive: true, force: true })
+  await mkdir(modulesDir, { recursive: true })
+  return fn()
+} })
 
 test('counts and lists only the plugins the user installed', async () => {
   const bundles = [
@@ -440,6 +472,41 @@ test('a non-forge host is reported as unsupported rather than checked', async ()
   const row = state.plugins.find((item) => item.name === 'from-self')
   assert.equal(row.state, 'blocked')
   assert.equal(row.reason, 'git-unsupported-host')
+  ctx.disposeAll()
+})
+
+test('an unchanged package keeps one date instead of claiming an update', async () => {
+  // The history already records this version, so nothing was replaced: the page
+  // must keep showing the install date rather than inventing an update time.
+  await stampPackage('a')
+  const first = harness([mine('a', '1.0.0')], { a: listed([]) })
+  await callRoute(first.ctx, { action: 'refresh' })
+  first.ctx.disposeAll()
+
+  const again = harness([mine('a', '1.0.0')], { a: listed([]) })
+  const state = await callRoute(again.ctx, { action: 'refresh' })
+  const row = state.plugins.find((item) => item.name === 'a')
+  assert.ok(Number.isFinite(row.installedAt), 'the install date survives a second check')
+  assert.equal(row.updatedAt, row.installedAt, 'an unchanged copy has not been updated')
+  again.ctx.disposeAll()
+})
+
+test('a version change records an update date distinct from the install date', async () => {
+  // The page has to tell "installed then" from "replaced since": the profile
+  // keeps no such record, so the plugin writes one and compares versions.
+  await stampPackage('a')
+  const first = await (async () => {
+    const { ctx } = harness([mine('a', '1.0.0')], { a: listed([]) })
+    const state = await callRoute(ctx, { action: 'refresh' })
+    ctx.disposeAll()
+    return state.plugins.find((item) => item.name === 'a')
+  })()
+  // Pretend time passed and the package moved to a new version.
+  const { ctx } = harness([mine('a', '2.0.0')], { a: listed([]) })
+  const second = await callRoute(ctx, { action: 'refresh' })
+  const row = second.plugins.find((item) => item.name === 'a')
+  assert.ok(row.updatedAt >= row.installedAt, 'the update is at or after the install')
+  assert.ok(Number.isFinite(first.installedAt), 'the first sighting was stamped')
   ctx.disposeAll()
 })
 
@@ -996,5 +1063,6 @@ for (const { name, fn } of tests) {
     console.log(`       ${error?.message ?? error}`)
   }
 }
+await rm(scratchHome, { recursive: true, force: true })
 console.log(`\n${tests.length - failed}/${tests.length} passed`)
 process.exitCode = failed === 0 ? 0 : 1

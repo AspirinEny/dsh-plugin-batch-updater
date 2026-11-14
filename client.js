@@ -37,7 +37,8 @@ window.__ModuleLoader__.load({
       "updatableGroup": "从 NPM 安装，可更新 {count} 项",
       "currentGroup": "已是最新 {count}",
       "blockedCount": "无法自动更新 {count}",
-      "installedOn": "安装于 {date}",
+      "installedOn": "安装 {date}",
+      "updatedOn": "更新 {date}",
       "gitGroup": "从 GIT 安装，可更新 {count} 项",
       "gitUnreadable": "读不到这个仓库的版本信息",
       "gitUnsupportedHost": "只支持 GitHub / GitLab / Bitbucket 仓库",
@@ -105,6 +106,7 @@ window.__ModuleLoader__.load({
       "currentGroup": "Up to date {count}",
       "blockedCount": "Cannot update automatically {count}",
       "installedOn": "installed {date}",
+      "updatedOn": "updated {date}",
       "gitGroup": "From GIT, {count} updatable",
       "gitUnreadable": "Could not read this repository's version",
       "gitUnsupportedHost": "Only GitHub / GitLab / Bitbucket repositories are supported",
@@ -210,11 +212,14 @@ window.__ModuleLoader__.load({
      */
     function formatDate(ms) {
       if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return ''
-      try {
-        return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' })
-      } catch {
-        return new Date(ms).toISOString().slice(0, 10)
-      }
+      // A fixed YYYY-MM-DD HH:mm:ss in local time. A locale-formatted string
+      // (「2026年11月09日 12:00:00」) is longer than the row can spare and changes
+      // shape between machines; the columns only line up when the format is
+      // fixed.
+      const pad = (value) => String(value).padStart(2, '0')
+      const at = new Date(ms)
+      return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ` +
+        `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`
     }
 
     /**
@@ -501,10 +506,14 @@ window.__ModuleLoader__.load({
           ? blockedText(row.reason, t)
           : row.installedVersion
       const installedOn = formatDate(row.installedAt)
-      const detail =
-        installedOn === ''
-          ? versionText
-          : `${versionText} · ${fill(t('installedOn'), { date: installedOn })}`
+      const updatedOn = formatDate(row.updatedAt)
+      // Both dates are shown when a copy was replaced at some point; when they
+      // coincide there is nothing to distinguish, so one line says it once.
+      const stamps = [
+        installedOn === '' ? null : fill(t('installedOn'), { date: installedOn }),
+        updatedOn === '' || updatedOn === installedOn ? null : fill(t('updatedOn'), { date: updatedOn }),
+      ].filter((part) => part !== null)
+      const detail = stamps.length === 0 ? versionText : `${versionText} · ${stamps.join(' · ')}`
 
       return h(
         'div',

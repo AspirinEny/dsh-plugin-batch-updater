@@ -24,6 +24,7 @@
   "currentGroup": "Up to date {count}",
   "blockedCount": "Cannot update automatically {count}",
   "installedOn": "installed {date}",
+  "updatedOn": "updated {date}",
   "gitGroup": "From GIT, {count} updatable",
   "gitUnreadable": "Could not read this repository's version",
   "gitUnsupportedHost": "Only GitHub / GitLab / Bitbucket repositories are supported",

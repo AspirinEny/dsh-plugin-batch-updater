@@ -19,8 +19,8 @@
 
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { dirname, join } from 'node:path'
-import { statSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 
 export const name = 'dsh-batch-updater'
 /** No hard dependency: the row stays inactive where nothing it needs exists. */
@@ -101,6 +101,158 @@ function profileModulesDir() {
   const profileDir = process.env.DSH_PROFILE_DIR
   if (typeof profileDir !== 'string' || profileDir === '') return null
   return join(profileDir, 'node_modules')
+}
+
+/**
+ * Where this plugin records the moment each package was installed and last
+ * updated.
+ *
+ * The profile keeps no such record: `pnpm` writes no per-package stamp and the
+ * lockfile's own time belongs to the whole profile. The package directory's
+ * modification time says when the copy landed, but a single install and a later
+ * update then look the same, so the two dates this page shows need one file of
+ * its own. It lives beside the profile rather than inside it, so removing the
+ * plugin does not leave a stray file in `node_modules`, and it is best-effort:
+ * a profile that cannot write it still shows the install date from the
+ * directory, and simply has no update date to show.
+ *
+ * @returns the record path, or null when the Host names no profile.
+ */
+function historyFile() {
+  const home = process.env.DSH_HOME
+  const profileDir = process.env.DSH_PROFILE_DIR
+  if (typeof profileDir !== 'string' || profileDir === '') return null
+  // DSH_HOME is the harness home; fall back to the profile's parent when it is
+  // absent, which keeps the file under the same tree either way.
+  const base = typeof home === 'string' && home !== '' ? home : dirname(profileDir)
+  return join(base, 'storages', SELF_NAME, 'history.json')
+}
+
+/**
+ * Work out when one package was installed and when it was last updated.
+ *
+ * The directory time answers the first question only: it moves on every
+ * reinstall, so after one update it can no longer say when the package first
+ * arrived. The history file therefore records the first time this page saw the
+ * copy at its current version, and every later change of version.
+ *
+ * A package the history has never seen takes the directory time for both, which
+ * is exactly right for a copy installed and never updated since.
+ *
+ * @param name - the package name.
+ * @param version - the version installed now.
+ * @param modulesRoot - the profile's `node_modules`.
+ * @param history - the recorded data.
+ * @returns the two timestamps, either of which may be null.
+ */
+function stampsFor(name, version, modulesRoot, history) {
+  const onDisk = installedAtOf(modulesRoot, name)
+  const record = history[name]
+  if (record === undefined) {
+    // First sighting: the copy landed at the directory time and has not been
+    // replaced since, so the two dates are the same.
+    return { installedAt: onDisk, updatedAt: onDisk }
+  }
+  const recordedVersion = typeof record.version === 'string' ? record.version : undefined
+  if (recordedVersion !== undefined && recordedVersion !== version) {
+    // The version changed since it was recorded: this copy is an update.
+    const when = onDisk ?? Date.now()
+    return { installedAt: record.installedAt ?? when, updatedAt: when }
+  }
+  // No recorded update yet: the copy is still the one that was installed, so
+  // the update date is the install date and the page shows one date instead of
+  // claiming it was updated at an unknown time.
+  const installedAt = record.installedAt ?? onDisk
+  return {
+    installedAt,
+    updatedAt: record.updatedAt ?? installedAt,
+  }
+}
+
+/**
+ * Record what this check saw, so the next one can tell an install from an update.
+ *
+ * A package seen for the first time is stamped with its directory time; one
+ * whose version moved is stamped now as both its new install point and its
+ * update point.
+ *
+ * @param file - the record path.
+ * @param rows - the rows the check just produced.
+ * @param history - the data as it was read.
+ * @returns true when anything was written.
+ */
+function rememberStamps(file, rows, history) {
+  const next = { ...history }
+  let changed = false
+  const now = Date.now()
+  for (const row of rows) {
+    if (typeof row.name !== 'string' || row.name === '') continue
+    const version = typeof row.installedVersion === 'string' ? row.installedVersion : ''
+    const previous = next[row.name]
+    if (previous === undefined) {
+      next[row.name] = { installedAt: row.installedAt ?? now, version, seenAt: now }
+      changed = true
+      continue
+    }
+    if (previous.version !== version) {
+      next[row.name] = {
+        installedAt: row.installedAt ?? now,
+        updatedAt: now,
+        version,
+        seenAt: now,
+      }
+      changed = true
+    }
+  }
+  if (!changed) return false
+  return writeHistory(file, next)
+}
+
+/**
+ * Read the install/update history.
+ * @param file - the record path.
+ * @returns a name-to-record map; empty when the file is missing or unusable.
+ */
+function readHistory(file) {
+  if (file === null) return {}
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const out = {}
+    for (const [name, entry] of Object.entries(parsed)) {
+      if (entry === null || typeof entry !== 'object') continue
+      const record = {}
+      if (Number.isFinite(entry.installedAt)) record.installedAt = entry.installedAt
+      if (Number.isFinite(entry.updatedAt)) record.updatedAt = entry.updatedAt
+      if (Number.isFinite(entry.seenAt)) record.seenAt = entry.seenAt
+      if (typeof entry.version === 'string') record.version = entry.version
+      out[name] = record
+    }
+    return out
+  } catch {
+    // A missing or hand-edited file is not an error: the page falls back to the
+    // directory time for the install date.
+    return {}
+  }
+}
+
+/**
+ * Write the history, replacing the file atomically.
+ * @param file - the record path.
+ * @param history - the data to store.
+ * @returns true when it was written.
+ */
+function writeHistory(file, history) {
+  if (file === null) return false
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    const temporary = `${file}.${process.pid}.tmp`
+    writeFileSync(temporary, JSON.stringify(history, null, 2), 'utf8')
+    renameSync(temporary, file)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -587,10 +739,11 @@ export function apply(ctx, config) {
    * @param installedVersion - the version in place now.
    * @param settings - the config in force.
    * @param installedAt - when this copy landed, for the page's timestamp.
+   * @param updatedAt - when it was last replaced, when that is known.
    * @returns the row the page renders.
    */
-  async function gitRow(bundle, installedVersion, settings, installedAt) {
-    const base = { name: bundle.name, installedVersion, installedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null }
+  async function gitRow(bundle, installedVersion, settings, installedAt, updatedAt) {
+    const base = { name: bundle.name, installedVersion, installedAt, updatedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null }
     if (settings.skip.includes(bundle.name)) return { ...base, state: 'blocked', reason: 'skipped-by-config' }
     const repo = gitSourceOf(bundle.source)
     if (repo === null) return { ...base, state: 'blocked', reason: 'git-unreadable' }
@@ -628,32 +781,37 @@ export function apply(ctx, config) {
     const all = Array.isArray(bundles) ? bundles : []
     const mine = all.filter(isUserInstalled)
     const settings = cfg()
-    // One read of the profile's node_modules, shared by every row.
+    // One read of the profile's node_modules and one of the history file,
+    // shared by every row.
     const modulesRoot = profileModulesDir()
+    const historyPath = historyFile()
+    const history = readHistory(historyPath)
 
     // Versions are read concurrently, but not all at once: each lookup is a
     // package-manager call, and a profile with a dozen plugins would otherwise
     // serialize a dozen round trips.
     const rows = await mapLimit(mine, 4, async (bundle) => {
       const installedVersion = typeof bundle.version === 'string' ? bundle.version : ''
-      const installedAt = installedAtOf(modulesRoot, bundle.name)
+      const stamps = stampsFor(bundle.name, installedVersion, modulesRoot, history)
+      const installedAt = stamps.installedAt
+      const updatedAt = stamps.updatedAt
       /** @type {null | string} */
       let reason = skipReasonFor(bundle, () => settings)
-      if (reason === 'git-installed') return gitRow(bundle, installedVersion, settings, installedAt)
+      if (reason === 'git-installed') return gitRow(bundle, installedVersion, settings, installedAt, updatedAt)
       if (reason !== null) {
-        return { name: bundle.name, installedVersion, installedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason }
+        return { name: bundle.name, installedVersion, installedAt, updatedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason }
       }
       let versions
       try {
         versions = await manager.listVersions(bundle.name)
       } catch (error) {
-        return { name: bundle.name, installedVersion, installedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason: `version-lookup-failed:${messageOf(error)}` }
+        return { name: bundle.name, installedVersion, installedAt, updatedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason: `version-lookup-failed:${messageOf(error)}` }
       }
       if (versions?.status !== 'listed') {
         // `problem` is a small code ('not-found', 'network', ...) the page can
         // translate; `reason` is a full English sentence meant for a log.
         const problem = typeof versions?.problem === 'string' ? versions.problem : 'unknown'
-        return { name: bundle.name, installedVersion, installedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason: problem }
+        return { name: bundle.name, installedVersion, installedAt, updatedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason: problem }
       }
       const target = pickTarget(versions.versions, settings.includePrerelease, installedVersion)
       if (target === undefined) {
@@ -662,6 +820,7 @@ export function apply(ctx, config) {
           name: bundle.name,
           installedVersion,
           installedAt,
+          updatedAt,
           enabled: bundle.enabled === true,
           targetVersion: null,
           registry: null,
@@ -673,6 +832,7 @@ export function apply(ctx, config) {
         name: bundle.name,
         installedVersion,
         installedAt,
+        updatedAt,
         enabled: bundle.enabled === true,
         targetVersion: target.version,
         registry: typeof versions.registry === 'string' ? versions.registry : null,
@@ -680,6 +840,10 @@ export function apply(ctx, config) {
         reason: null,
       }
     })
+
+    // Remember what this check saw, so the next one can tell an install from an
+    // update. Best-effort: an unwritable profile still shows the directory date.
+    rememberStamps(historyPath, rows, history)
 
     state.checked = mine.length
     state.plugins = rows
@@ -820,12 +984,16 @@ export function apply(ctx, config) {
     if (landed) {
       // The manager applied it: the installed version is the target now, and the
       // row belongs with the plugins that are up to date.
+      const now = Date.now()
       row.state = 'current'
       row.installedVersion = String(item.targetVersion)
       row.targetVersion = null
       row.reason = null
       row.registry = null
-      row.installedAt = Date.now()
+      // The copy was just replaced: that is an update, and the install date it
+      // came in with is kept as the day it first landed.
+      row.updatedAt = now
+      if (row.installedAt === null || row.installedAt === undefined) row.installedAt = now
       return
     }
     // A failure or a cancellation leaves the installed version in place, so the
