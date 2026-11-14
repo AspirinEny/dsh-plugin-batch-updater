@@ -420,8 +420,9 @@ assert.ok(idleHtml.includes('type="checkbox"'), 'rows carry a checkbox')
 // The page states facts in the rows; the prose that explained the page to
 // itself was noise, and these lines keep it gone.
 // Both dates, in their own right-aligned column, one line each.
-assert.ok(/首次安装于：<\/span><span[^>]*>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(idleHtml),
-  'each row shows its install time to the second')
+// The install line is gone: the profile keeps no install record, so showing it
+// only ever repeated the directory time.
+assert.equal(idleHtml.includes('首次安装于'), false, 'no install line is rendered')
 assert.ok(/上次更新：<\/span><span[^>]*>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(idleHtml),
   'a replaced copy shows its last update time, on its own line')
 // A copy that was only ever installed must not claim an update.

@@ -22,6 +22,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, sep } from 'node:path'
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 
 export const name = 'dsh-batch-updater'
 /** No hard dependency: the row stays inactive where nothing it needs exists. */
@@ -84,6 +85,17 @@ let modulesDirOverride = null
  * @param home - the harness home, or null to use the environment.
  * @param modulesDir - the profile's node_modules, or null to use the environment.
  */
+/** Replaces the detached launch in tests; the Host leaves it null. */
+let spawnOverride = null
+
+/**
+ * Observe self-updates without starting a process.
+ * @param next - receives the command, its arguments and the spec, or null.
+ */
+export function __setSelfUpdateSpawn(next) {
+  spawnOverride = typeof next === 'function' ? next : null
+}
+
 export function __setRoots(home, modulesDir) {
   homeOverride = typeof home === 'string' && home !== '' ? home : null
   modulesDirOverride = typeof modulesDir === 'string' && modulesDir !== '' ? modulesDir : null
@@ -574,7 +586,9 @@ function skipReasonFor(bundle, cfg) {
   if (bundle === null || typeof bundle !== 'object') return 'unreadable'
   const name = typeof bundle.name === 'string' ? bundle.name : ''
   if (name === '') return 'unreadable'
-  if (name === SELF_NAME) return 'self'
+  // This plugin is handled separately: it can replace itself, but only by
+  // handing the work to another process (see selfUpdate).
+  if (name === SELF_NAME) return 'self-managed'
   if (cfg().skip.includes(name)) return 'skipped-by-config'
   // DSH 0.2.2-rc.2 replaced `updatable: boolean` with `update: 'registry' | 'git'`.
   // Reading only the old field made every registry plugin look not-updatable, so
@@ -768,8 +782,10 @@ export function apply(ctx, config) {
         targetVersion: row.targetVersion,
         registry: row.registry ?? null,
         // `registry` items go through `updateBundle`; a Git source is removed
-        // and installed again, which is the only way the manager can move it.
+        // and installed again; this plugin is replaced by the CLI in another
+        // process, because it cannot remove itself while it runs.
         git: row.state === 'git-updatable',
+        self: row.self === true,
         source: row.source ?? null,
       }))
   }
@@ -853,6 +869,47 @@ export function apply(ctx, config) {
   }
 
   /**
+   * Work out whether this plugin itself has a newer release.
+   *
+   * The manager refuses to replace a bundle carrying plugin management while it
+   * runs, and this page is exactly that, so it updates by handing the job to a
+   * separate `dsh plugin add` process: the running copy keeps serving until the
+   * app restarts. The row therefore reports a real target but is installed by
+   * `selfUpdate`, never by `updateBundle`.
+   *
+   * @param bundle - this plugin's own `listBundles()` entry.
+   * @param installedVersion - the version running now.
+   * @param settings - the config in force.
+   * @param installedAt - when this copy landed.
+   * @param updatedAt - when it was last replaced, if known.
+   * @returns the row the page renders.
+   */
+  async function selfRow(bundle, installedVersion, settings, installedAt, updatedAt) {
+    const base = {
+      name: bundle.name, installedVersion, installedAt, updatedAt,
+      enabled: bundle.enabled === true, targetVersion: null, registry: null,
+    }
+    const repo = gitSourceOf(bundle.source)
+    if (repo === null) return { ...base, state: 'current', reason: null, self: true }
+    const head = await readHeadVersion(bundle.source, readWithRetry)
+    if (head.kind !== 'version') {
+      // A failed read of our own repository is not worth a blocked row: the
+      // plugin works, so report it as up to date and move on.
+      return { ...base, state: 'current', reason: null, self: true }
+    }
+    const newer = compareVersions(head.version, installedVersion) > 0
+    return {
+      ...base,
+      self: true,
+      state: newer ? 'updatable' : 'current',
+      reason: newer ? 'self' : null,
+      targetVersion: newer ? head.version : null,
+      source: typeof bundle.source === 'string' ? bundle.source : null,
+      detail: repo.web,
+    }
+  }
+
+  /**
    * Read the user's own bundles and work out which ones can move.
    *
    * Every user-installed bundle gets a row, whether or not it can move: a page
@@ -884,6 +941,7 @@ export function apply(ctx, config) {
       const updatedAt = stamps.updatedAt
       /** @type {null | string} */
       let reason = skipReasonFor(bundle, () => settings)
+      if (reason === 'self-managed') return selfRow(bundle, installedVersion, settings, installedAt, updatedAt)
       if (reason === 'git-installed') return gitRow(bundle, installedVersion, settings, installedAt, updatedAt)
       if (reason !== null) {
         return { name: bundle.name, installedVersion, installedAt, updatedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason }
@@ -980,9 +1038,11 @@ export function apply(ctx, config) {
       // pinned. Removing it and installing the saved spec again is what a manual
       // reinstall does, and `installBundle` already restores the profile files
       // when the install fails.
-      const result = item.git === true
-        ? await reinstallFromGit(item)
-        : await manager.updateBundle(item.name, item.targetVersion, options)
+      const result = item.self === true
+        ? await selfUpdate(item)
+        : item.git === true
+          ? await reinstallFromGit(item)
+          : await manager.updateBundle(item.name, item.targetVersion, options)
       const detail = outcomeOf(result)
       run.results.push({
         name: item.name,
@@ -993,6 +1053,7 @@ export function apply(ctx, config) {
         step: detail.step,
         registry: item.registry ?? null,
         git: item.git === true,
+        self: item.self === true,
         source: item.source ?? null,
         pendingBuilds: detail.pendingBuilds.length > 0 ? detail.pendingBuilds : undefined,
       })
@@ -1051,6 +1112,112 @@ export function apply(ctx, config) {
   }
 
   /**
+   * Replace this plugin by running the official CLI in a detached process.
+   *
+   * The manager cannot do it: a bundle carrying plugin management cannot be
+   * removed while it runs, and that is what this page is. The CLI writes the
+   * package and the lockfile itself, so the next launch loads the new copy; the
+   * running one keeps working until then.
+   *
+   * The command is detached and unref'd so it outlives the request, and its
+   * output goes to a log beside the profile's other plugin-manager logs rather
+   * than nowhere.
+   *
+   * @param item - the self row, carrying the spec it was installed from.
+   * @returns a result shaped like `updateBundle`'s, describing the handoff.
+   */
+  async function selfUpdate(item) {
+    const source = typeof item.source === 'string' && item.source !== '' ? item.source : `github:AspirinEny/dsh-plugin-batch-updater`
+    const profile = process.env.DSH_PROFILE || ''
+    const launcher = dshLauncher()
+    if (launcher === null) {
+      throw new Error('cannot locate the dsh launcher next to this installation')
+    }
+    const args = [
+      ...launcher.args,
+      'plugin',
+      ...profile === '' ? [] : ['--profile', profile],
+      'add',
+      source,
+    ]
+    if (typeof spawnOverride === 'function') {
+      // A test observes the handoff instead of starting a package manager.
+      spawnOverride(launcher.command, args, source)
+      return {
+        from: item.installedVersion,
+        to: item.targetVersion,
+        step: 'install',
+        result: { changed: true, application: 'restart-required', stage: 'install', target: source },
+        deferred: true,
+      }
+    }
+    const logFile = selfUpdateLogPath()
+    let out
+    try {
+      if (logFile !== null) {
+        mkdirSync(dirname(logFile), { recursive: true })
+        out = (await import('node:fs')).openSync(logFile, 'a')
+      }
+    } catch {
+      out = undefined
+    }
+    const child = spawn(launcher.command, args, {
+      detached: true,
+      stdio: ['ignore', out ?? 'ignore', out ?? 'ignore'],
+      windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    })
+    child.unref()
+    return {
+      from: item.installedVersion,
+      to: item.targetVersion,
+      step: 'install',
+      result: {
+        changed: true,
+        // The running copy is untouched, so the new one takes effect at the
+        // next start: saying "applied" would be a lie until then.
+        application: 'restart-required',
+        stage: 'install',
+        target: source,
+      },
+      deferred: true,
+    }
+  }
+
+  /**
+   * Where a self-update writes its output.
+   * @returns the log path, or null when the profile is unknown.
+   */
+  function selfUpdateLogPath() {
+    const base = harnessHome()
+    if (base === null) return null
+    return join(base, 'storages', SELF_NAME, 'self-update.log')
+  }
+
+  /**
+   * The command that runs the official CLI for this profile.
+   *
+   * The Desktop installation ships its own launcher script beside the running
+   * executable; a plain `dsh` on PATH is the fallback for other installs.
+   *
+   * @returns the command, its leading arguments, and whether it was found.
+   */
+  function dshLauncher() {
+    const execPath = typeof process.env.DSH_NODE_EXECUTABLE === 'string'
+      ? process.env.DSH_NODE_EXECUTABLE
+      : process.execPath
+    if (typeof execPath === 'string' && execPath !== '') {
+      const cli = join(dirname(execPath), 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd')
+      try {
+        if (statSync(cli).isFile()) return { command: cli, args: [] }
+      } catch {
+        // Not a Desktop layout; fall through.
+      }
+    }
+    return { command: 'dsh', args: [] }
+  }
+
+  /**
    * Fold a finished item into the list the page renders.
    *
    * Without this the row kept offering an Update button until the whole batch
@@ -1069,6 +1236,12 @@ export function apply(ctx, config) {
       outcome !== undefined &&
       (outcome.outcome === 'applied' || outcome.outcome === 'restart-required' || outcome.outcome === 'overridden')
     if (landed) {
+      // A self-update was only handed to another process: this copy keeps
+      // running until the app restarts, so the row must keep offering it.
+      if (item.self === true) {
+        row.targetVersion = item.targetVersion
+        return
+      }
       // The manager applied it: the installed version is the target now, and the
       // row belongs with the plugins that are up to date.
       const now = Date.now()
@@ -1097,7 +1270,7 @@ export function apply(ctx, config) {
    * @param registry - the registry that answered the version lookup, if any.
    * @returns the batch record, or null when the name is not in the known list.
    */
-  async function runOne(name, target, installed, registry, git, source) {
+  async function runOne(name, target, installed, registry, git, source, self) {
     if (running !== null) return running
     if (manager === undefined) throw new Error('plugin manager is not available')
     const item = {
@@ -1106,6 +1279,7 @@ export function apply(ctx, config) {
       targetVersion: target,
       registry: registry ?? null,
       git: git === true,
+      self: self === true,
       source: source ?? null,
     }
     const run = {
@@ -1467,7 +1641,7 @@ export function apply(ctx, config) {
                 if (known === undefined) {
                   return reply({ ok: false, code: 'unknown-target', message: `${name}@${target} is not a checked target` })
                 }
-                await runOne(name, target, known.installedVersion, known.registry ?? null, known.git, known.source)
+                await runOne(name, target, known.installedVersion, known.registry ?? null, known.git, known.source, known.self)
                 return reply({ ...snapshot(), started: true })
               }
               if (action === 'retryFailed') {
@@ -1482,6 +1656,7 @@ export function apply(ctx, config) {
                   targetVersion: row.to,
                   registry: row.registry ?? null,
                   git: row.git === true,
+                  self: row.self === true,
                   source: row.source ?? null,
                 }))
                 const run = startBatch(queue, 'retry')

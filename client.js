@@ -37,7 +37,6 @@ window.__ModuleLoader__.load({
       "updatableGroup": "从 NPM 安装，可更新 {count} 项",
       "currentGroup": "已是最新 {count} 项",
       "blockedCount": "无法自动更新 {count} 项",
-      "installedLabel": "首次安装于：",
       "updatedLabel": "上次更新：",
       "gitGroup": "从 GIT 安装，可更新 {count} 项",
       "gitUnreadable": "读不到这个仓库的版本信息",
@@ -71,6 +70,7 @@ window.__ModuleLoader__.load({
       "reasonNotFromRegistry": "非 registry 安装，无法自动更新",
       "reasonSkipped": "已在配置中跳过",
       "reasonSelf": "本插件自身",
+      "selfUpdateNote": "更新本插件会在后台安装，重启 DeepSeek Harness 后生效。",
       "reasonNeedsDsh": "需要更新 DSH",
       "reasonPrerelease": "只有预发布版本",
       "reasonDeprecated": "新版本均已废弃",
@@ -105,7 +105,6 @@ window.__ModuleLoader__.load({
       "updatableGroup": "From NPM, {count} updatable",
       "currentGroup": "Up to date: {count}",
       "blockedCount": "Cannot update automatically: {count}",
-      "installedLabel": "First installed:",
       "updatedLabel": "Last updated:",
       "gitGroup": "From GIT, {count} updatable",
       "gitUnreadable": "Could not read this repository's version",
@@ -139,6 +138,7 @@ window.__ModuleLoader__.load({
       "reasonNotFromRegistry": "Not installed from a registry, so it cannot be updated automatically",
       "reasonSkipped": "Skipped in settings",
       "reasonSelf": "This plugin itself",
+      "selfUpdateNote": "Updating this plugin installs it in the background; it takes effect after DeepSeek Harness restarts.",
       "reasonNeedsDsh": "Needs a newer DSH",
       "reasonPrerelease": "Prerelease only",
       "reasonDeprecated": "Newer versions are deprecated",
@@ -519,7 +519,6 @@ window.__ModuleLoader__.load({
       // always both: a copy that was never replaced still has a last-update
       // time, which is its install time. Leaving the line out made the column
       // jump from row to row.
-      const installedOn = formatDate(row.installedAt)
       const updatedOn = formatDate(row.updatedAt)
 
       return h(
@@ -548,27 +547,21 @@ window.__ModuleLoader__.load({
             : h('div', { className: 'bu-title' }, row.name),
           h('div', { className: `bu-sub ${updatable || gitUpdatable ? 'bu-mono' : ''}`.trim() }, versionText),
         ),
-        h(
-          'div',
-          { className: 'bu-stamps' },
-          h(
-            'div',
-            { className: 'bu-stamp' },
-            h('span', { className: 'bu-stampLabel' }, t('installedLabel')),
-            h('span', { className: 'bu-stampValue' }, installedOn === '' ? t('stampUnknown') : installedOn),
-          ),
-          // Only a copy this page actually saw being replaced gets an update
-          // line. Repeating the install time here told every user that every
-          // plugin had been updated, which was never true.
-          updatedOn === ''
-            ? null
-            : h(
+        // Only an update this page actually witnessed is worth showing: the
+        // install date was always the same as itself, so it stated nothing, and
+        // the profile keeps no install record to make it meaningful.
+        updatedOn === ''
+          ? null
+          : h(
+              'div',
+              { className: 'bu-stamps' },
+              h(
                 'div',
                 { className: 'bu-stamp' },
                 h('span', { className: 'bu-stampLabel' }, t('updatedLabel')),
                 h('span', { className: 'bu-stampValue' }, updatedOn),
               ),
-        ),
+            ),
         h(
           'div',
           { className: 'bu-rowEnd' },
@@ -642,6 +635,7 @@ window.__ModuleLoader__.load({
 
       const npmRows = plugins.filter((row) => row.state === 'updatable')
       const gitRows = plugins.filter((row) => row.state === 'git-updatable')
+      const selfRows = plugins.filter((row) => row.self === true && row.state === 'updatable')
       // One selection across both channels: the toolbar's Update covers
       // everything ticked, and each group's own button covers just its rows.
       const updatableNames = [...npmRows, ...gitRows].map((row) => row.name)
@@ -1020,6 +1014,12 @@ window.__ModuleLoader__.load({
                     ),
                   ),
             )
+          : null,
+
+        // This plugin can update itself, but only by handing the work to a
+        // separate process, so the result applies at the next start.
+        available && selfRows.length > 0
+          ? h('div', { className: 'bu-note' }, t('selfUpdateNote'))
           : null,
 
         // Git installs that moved ahead. They are updated by the same batch:

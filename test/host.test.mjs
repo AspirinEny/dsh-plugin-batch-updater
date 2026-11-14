@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, __setFetchText, __setRoots } from '../index.js'
+import { apply, __setFetchText, __setRoots, __setSelfUpdateSpawn } from '../index.js'
 
 // The plugin records install/update times under the harness home. Give the run
 // a scratch home so tests never read or write a real profile's history, and so
@@ -623,15 +623,43 @@ test('a batch moves each row to up to date as its own install settles', async ()
   ctx.disposeAll()
 })
 
-test('skips the plugin itself even though the user installed it', async () => {
-  const bundles = [mine('dsh-batch-updater', '0.1.0'), mine('other', '1.0.0')]
-  const { ctx, manager } = harness(bundles, { other: listed([versionRecord('2.0.0')]) })
+test('checks itself against its own repository instead of the registry', async () => {
+  // The plugin cannot replace itself through updateBundle, but it can say whether
+  // its repository moved on, and hand that to the CLI.
+  const bundles = [mine('dsh-batch-updater', '0.1.0', { update: 'git', source: 'github:me/dsh-batch-updater' })]
+  stubRepo('me/dsh-batch-updater', '0.2.0')
+  const { ctx, manager } = harness(bundles, {})
   const state = await callRoute(ctx, { action: 'refresh' })
   const self = state.plugins.find((row) => row.name === 'dsh-batch-updater')
-  assert.ok(self, 'the plugin still lists itself')
-  assert.equal(self.state, 'blocked')
-  assert.equal(self.reason, 'self')
+  assert.ok(self, 'the plugin lists itself')
+  assert.equal(self.self, true, 'the row is marked as the plugin itself')
+  assert.equal(self.state, 'updatable')
+  assert.equal(self.targetVersion, '0.2.0')
   assert.equal(manager.calls.listVersions.includes('dsh-batch-updater'), false, 'it never asks the registry about itself')
+  ctx.disposeAll()
+})
+
+test('a self update hands off to the CLI and stays pending until restart', async () => {
+  // The running copy cannot be removed by itself, so the install is a detached
+  // dsh plugin add; the row must keep offering it until the app restarts.
+  const bundles = [mine('dsh-batch-updater', '0.1.0', { update: 'git', source: 'github:me/dsh-batch-updater' })]
+  stubRepo('me/dsh-batch-updater', '0.2.0')
+  const launches = []
+  __setSelfUpdateSpawn((command, args, spec) => launches.push({ command, args, spec }))
+  const { ctx, manager } = harness(bundles, {})
+  await callRoute(ctx, { action: 'refresh' })
+  const started = await callRoute(ctx, { action: 'updateAll' })
+  assert.equal(started.started, true)
+  const settled = await settle(ctx, started)
+  const row = settled.run.results.find((item) => item.name === 'dsh-batch-updater')
+  assert.equal(row.outcome, 'restart-required', 'the new copy lands at the next start')
+  assert.equal(row.self, true)
+  assert.equal(manager.calls.updateBundle.length, 0, 'updateBundle is never asked to replace the running copy')
+  assert.equal(launches.length, 1, 'one detached CLI launch was prepared')
+  assert.deepEqual(launches[0].args.slice(-2), ['add', 'github:me/dsh-batch-updater'], 'it reinstalls the saved spec')
+  const after = settled.plugins.find((item) => item.name === 'dsh-batch-updater')
+  assert.equal(after.state, 'updatable')
+  __setSelfUpdateSpawn(null)
   ctx.disposeAll()
 })
 

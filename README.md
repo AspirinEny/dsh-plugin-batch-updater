@@ -183,6 +183,19 @@ layout, styling, or how the page actually looks.
 
 ## Changelog
 
+### 0.1.11
+
+- **This plugin checks and updates itself.** It has its own row now, under the
+  NPM/GIT groups, fed by the repository that installed it rather than by a
+  registry. When the repository moves ahead the row offers **Update**, and the
+  install is handed to a detached `dsh plugin --profile <name> add <spec>`
+  process: the running copy cannot be removed by itself, so the new one takes
+  effect at the next start. The result reports **restart required** and the row
+  keeps offering the update until the running version actually changes.
+- The install-date line is gone. The profile keeps no install record, so that
+  line could only repeat the package directory's time; only a genuinely
+  observed update is shown now, as **上次更新：**.
+
 ### 0.1.10
 
 - **Fix: every plugin showed the same install and update time.** The update date
