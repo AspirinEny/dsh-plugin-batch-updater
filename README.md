@@ -183,6 +183,12 @@ layout, styling, or how the page actually looks.
 
 ## Changelog
 
+### 0.1.13
+
+- The check-interval label, its field and **Save** moved into the main toolbar,
+  to the left of **Check now**. They were a second toolbar row of their own;
+  one row is enough for the two things this page is for.
+
 ### 0.1.12
 
 - **Every row shows a time again.** The update line was fed only by what this

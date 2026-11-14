@@ -516,7 +516,18 @@ const loadingHtml = renderTab(loading)
 assert.ok(loadingHtml.includes('正在读取插件列表'), 'the first paint says it is loading')
 
 // The schedule is editable from the page.
+// The interval control, its field and Save live in the same toolbar row as
+// Check now, in that order, rather than in a second toolbar underneath.
 assert.ok(idleHtml.includes('检查间隔'), 'the page exposes the check interval')
+assert.equal(idleHtml.includes('bu-interval'), true, 'the interval control is its own cluster')
+const intervalAt = idleHtml.indexOf('检查间隔')
+const checkNowAt = idleHtml.indexOf('立即检查')
+assert.ok(intervalAt > 0 && checkNowAt > intervalAt, 'the interval sits to the left of Check now')
+assert.equal(
+  (idleHtml.match(/class="bu-toolbar"/g) ?? []).length,
+  1,
+  'the controls share one toolbar instead of two stacked rows',
+)
 assert.ok(idleHtml.includes('保存'), 'and a control to save it')
 
 // The toast speaks only after a settled run with results, and honours dismissal.

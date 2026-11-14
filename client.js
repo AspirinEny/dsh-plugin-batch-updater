@@ -365,6 +365,9 @@ window.__ModuleLoader__.load({
 .bu-btnPrimary:hover:not(:disabled) { filter: brightness(1.05); background: var(--dsw-alias-brand-primary); }
 .bu-btnGhost { border-color: transparent; background: transparent; color: var(--dsw-alias-label-secondary); }
 .bu-btnGhost:hover:not(:disabled) { background: var(--dsw-alias-bg-layer-2); }
+/* The schedule control reads as one unit inside the toolbar, so the label, the
+   field and Save never wrap away from each other. */
+.bu-interval { display: inline-flex; align-items: center; gap: 6px; flex: none; }
 .bu-input { width: 84px; height: 28px; padding: 0 8px; border-radius: 8px; text-align: center;
   border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1);
   color: var(--dsw-alias-label-primary); font-family: inherit; font-size: 13px; }
@@ -764,6 +767,59 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'bu-toolbar' },
+          // The schedule control sits to the left of Check now: one row for the
+          // two things a person comes here to do, instead of a second toolbar.
+          available
+            ? h(
+                'span',
+                { className: 'bu-interval' },
+                h('span', { className: 'bu-note' }, t('intervalLabel')),
+                h('input', {
+                  type: 'number',
+                  className: 'bu-input bu-mono',
+                  min: 5,
+                  max: 10080,
+                  step: 1,
+                  value: intervalValue,
+                  disabled: busy || !available,
+                  'aria-label': t('intervalLabel'),
+                  onChange: (event) => setIntervalDraft(event.target.value),
+                }),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'bu-btn',
+                    disabled: busy || !available || intervalDraft === null,
+                    onClick: async () => {
+                      const answer = await act('setInterval', { minutes: Number(intervalValue) })
+                      // A refused save must say so; silently clearing the draft
+                      // made a rejected value look accepted.
+                      if (answer?.ok === false) {
+                        setIntervalError(answer.message ?? answer.code ?? '')
+                        return
+                      }
+                      // Applied but not written down: the timer really did change,
+                      // so do not claim it failed — say it will not survive a restart.
+                      setIntervalError(null)
+                      setIntervalNote(answer?.persisted === false ? t('intervalNotSaved') : null)
+                      setIntervalDraft(null)
+                    },
+                  },
+                  t('intervalSave'),
+                ),
+                intervalError !== null
+                  ? h('span', { className: 'bu-note', role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)' } },
+                      fill(t('intervalBad'), { message: intervalError }))
+                  : null,
+                intervalNote !== null
+                  ? h('span', { className: 'bu-note', role: 'status' }, intervalNote)
+                  : null,
+                data?.config?.autoApply === true
+                  ? h('span', { className: 'bu-note' }, t('autoOn'))
+                  : null,
+              )
+            : null,
           h(
             'button',
             {
@@ -799,59 +855,6 @@ window.__ModuleLoader__.load({
           h('span', { className: 'bu-note' }, statusLine),
         ),
 
-        // Schedule control. The same value is editable from the plugin's own
-        // Configure page; this is the shortcut for the one setting people change.
-        available
-          ? h(
-              'div',
-              { className: 'bu-toolbar' },
-              h('span', { className: 'bu-note' }, t('intervalLabel')),
-              h('input', {
-                type: 'number',
-                className: 'bu-input bu-mono',
-                min: 5,
-                max: 10080,
-                step: 1,
-                value: intervalValue,
-                disabled: busy || !available,
-                'aria-label': t('intervalLabel'),
-                onChange: (event) => setIntervalDraft(event.target.value),
-              }),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'bu-btn',
-                  disabled: busy || !available || intervalDraft === null,
-                  onClick: async () => {
-                    const answer = await act('setInterval', { minutes: Number(intervalValue) })
-                    // A refused save must say so; silently clearing the draft
-                    // made a rejected value look accepted.
-                    if (answer?.ok === false) {
-                      setIntervalError(answer.message ?? answer.code ?? '')
-                      return
-                    }
-                    // Applied but not written down: the timer really did change,
-                    // so do not claim it failed — say it will not survive a restart.
-                    setIntervalError(null)
-                    setIntervalNote(answer?.persisted === false ? t('intervalNotSaved') : null)
-                    setIntervalDraft(null)
-                  },
-                },
-                t('intervalSave'),
-              ),
-              intervalError !== null
-                ? h('span', { className: 'bu-note', role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)' } },
-                    fill(t('intervalBad'), { message: intervalError }))
-                : null,
-              intervalNote !== null
-                ? h('span', { className: 'bu-note', role: 'status' }, intervalNote)
-                : null,
-              data?.config?.autoApply === true
-                ? h('span', { className: 'bu-note' }, t('autoOn'))
-                : null,
-            )
-          : null,
 
         managerMissing
           ? h('div', { className: 'bu-cards' }, h('div', { className: 'bu-empty' }, t('noManager')))
