@@ -222,10 +222,14 @@ function stubStore(snapshot) {
 
 const baseConfig = { intervalMinutes: 360, autoApply: false, includePrerelease: false }
 
+// Every row carries when its copy landed; the page prints it as a date.
+const INSTALLED_AT = Date.UTC(2026, 10, 9, 4, 0, 0)
+
 /** One row for a plugin that can move. */
 const rowUpdatable = (name, from, to) => ({
   name,
   installedVersion: from,
+  installedAt: INSTALLED_AT,
   enabled: true,
   targetVersion: to,
   registry: null,
@@ -237,6 +241,7 @@ const rowUpdatable = (name, from, to) => ({
 const rowCurrent = (name, version) => ({
   name,
   installedVersion: version,
+  installedAt: INSTALLED_AT,
   enabled: true,
   targetVersion: null,
   registry: null,
@@ -248,6 +253,7 @@ const rowCurrent = (name, version) => ({
 const rowBlocked = (name, version, reason) => ({
   name,
   installedVersion: version,
+  installedAt: INSTALLED_AT,
   enabled: true,
   targetVersion: null,
   registry: null,
@@ -390,6 +396,12 @@ assert.equal(
 assert.ok(idleHtml.includes('共 14 个自装插件'), 'the count is the user\'s own plugins')
 assert.ok(idleHtml.includes('有 2 个插件可以更新'), 'the notice states how many can move')
 assert.ok(idleHtml.includes('type="checkbox"'), 'rows carry a checkbox')
+// The page states facts in the rows; the prose that explained the page to
+// itself was noise, and these lines keep it gone.
+assert.ok(/安装于 \d{4}/.test(idleHtml), 'each row shows when its copy was installed')
+assert.equal(idleHtml.includes('只显示你自行安装的插件'), false, 'the self-note is gone')
+assert.equal(idleHtml.includes('只检查，不自动安装'), false, 'the autoApply suffix is gone')
+assert.equal(idleHtml.includes('内置管理器不会为它们'), false, 'the git group note is gone')
 assert.ok(idleHtml.includes('全部更新 (2)'), 'the button numbers the ticked rows')
 
 // A finished run reports itself and its restart need.

@@ -37,8 +37,8 @@ window.__ModuleLoader__.load({
       "updatableGroup": "可更新 {count}",
       "currentGroup": "已是最新 {count}",
       "blockedCount": "无法自动更新 {count}",
+      "installedOn": "安装于 {date}",
       "gitGroup": "从 Git 安装，有新版本 {count}",
-      "gitGroupNote": "这些插件从 Git 仓库安装，内置管理器不会为它们查询版本。下面是仓库里的最新版本；点右侧按钮复制重装命令。",
       "gitManualHint": "需重装",
       "gitCopyCommand": "复制命令",
       "gitCopied": "已复制",
@@ -53,9 +53,7 @@ window.__ModuleLoader__.load({
       "intervalNotSaved": "已生效，但没能写入配置，重启后会恢复原值。",
       "unreachable": "暂时连不上 DSH 宿主（{message}），正在自动重试。",
       "retryConnect": "立即重试",
-      "autoOff": "· 只检查，不自动安装",
       "autoOn": "· 发现更新会自动安装",
-      "selfNote": "只显示你自行安装的插件；DSH 自带的插件和本插件不在列表中。",
       "runProgress": "正在更新 {index}/{total}：{name}",
       "runFinished": "更新完成：{applied} 个成功，{failed} 个失败",
       "runCancelled": "更新已停止",
@@ -109,8 +107,8 @@ window.__ModuleLoader__.load({
       "updatableGroup": "Can update {count}",
       "currentGroup": "Up to date {count}",
       "blockedCount": "Cannot update automatically {count}",
+      "installedOn": "installed {date}",
       "gitGroup": "Installed from Git, newer version {count}",
-      "gitGroupNote": "These were installed from a Git repository, which the built-in manager does not query for versions. The newest version in the repository is below; copy the reinstall command with the button on the right.",
       "gitManualHint": "reinstall to update",
       "gitCopyCommand": "Copy command",
       "gitCopied": "Copied",
@@ -125,9 +123,7 @@ window.__ModuleLoader__.load({
       "intervalNotSaved": "Applied, but it could not be written to the profile; it reverts on restart.",
       "unreachable": "Cannot reach the DSH host right now ({message}); retrying automatically.",
       "retryConnect": "Retry now",
-      "autoOff": "· checks only, never installs",
       "autoOn": "· installs what it finds",
-      "selfNote": "Only the plugins you installed yourself; DSH's own bundles and this plugin are left out.",
       "runProgress": "Updating {index}/{total}: {name}",
       "runFinished": "Finished: {applied} updated, {failed} failed",
       "runCancelled": "The run was stopped",
@@ -211,6 +207,23 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Format an install timestamp as a calendar date.
+     *
+     * An install happened on a day, and the page shows the day; the clock time
+     * would add precision nobody acts on and make every row wider.
+     * @param ms - epoch milliseconds.
+     * @returns a short local date, or an empty string.
+     */
+    function formatDate(ms) {
+      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return ''
+      try {
+        return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' })
+      } catch {
+        return new Date(ms).toISOString().slice(0, 10)
+      }
+    }
+
+    /**
      * Format a timestamp the way the host formats times elsewhere.
      * @param ms - epoch milliseconds.
      * @returns a short local time, or an empty string.
@@ -237,6 +250,9 @@ window.__ModuleLoader__.load({
         snapshot = { ...snapshot, ...next }
         for (const listener of listeners) listener()
       }
+
+      /** Set by `apply` once the poller exists, so an action can restart it. */
+      let pollNowRef = null
 
       const load = () => {
         if (inFlight !== null) return inFlight
@@ -293,6 +309,10 @@ window.__ModuleLoader__.load({
             data: failed ? snapshot.data : data,
             error: failed ? { message: data.message ?? '', code: data.code ?? '' } : null,
           })
+          // A batch outlives this answer, and an idle page reads only every 20
+          // seconds, so the poll is restarted here: the run's later progress then
+          // reaches the page at the running cadence instead of on a stale timer.
+          if (typeof pollNowRef === 'function') pollNowRef()
           return data
         },
         dismissRun: (startedAt) => {
@@ -320,7 +340,12 @@ window.__ModuleLoader__.load({
         'style',
         null,
         `
-.bu-page { display: flex; flex-direction: column; gap: 12px; padding: 2px 0 28px; }
+/* One type scale for the whole page: the host's own font, 13px body and 12px
+   secondary. Anything that needs to stand out does so with colour and weight,
+   never with a different family — a second font made the rows look unlike each
+   other. */
+.bu-page { display: flex; flex-direction: column; gap: 12px; padding: 2px 0 28px;
+  font-family: inherit; font-size: 13px; }
 .bu-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .bu-toolbarSpacer { flex: 1 1 auto; }
 .bu-note { color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; }
@@ -359,7 +384,7 @@ window.__ModuleLoader__.load({
   accent-color: var(--dsw-alias-brand-primary); }
 .bu-check:disabled { cursor: default; opacity: .45; }
 .bu-rowMain { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.bu-title { font-size: 13px; color: var(--dsw-alias-label-primary); overflow: hidden;
+.bu-title { font-size: 13px; font-weight: 400; color: var(--dsw-alias-label-primary); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .bu-titleBtn { border: none; background: none; padding: 0; font: inherit; text-align: left;
   color: inherit; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -367,9 +392,13 @@ window.__ModuleLoader__.load({
 .bu-titleBtn:hover { color: var(--dsw-alias-brand-primary); }
 .bu-titleBtn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px;
   border-radius: 3px; }
-.bu-sub { font-size: 12px; color: var(--dsw-alias-label-secondary); overflow: hidden;
+.bu-sub { font-family: inherit; font-size: 12px; font-weight: 400;
+  color: var(--dsw-alias-label-secondary); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
-.bu-mono { font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 12px; }
+/* Version numbers read as ordinary text like every other row; only the inline
+   code chips keep a monospace face. A second font family in a list of plugin
+   names was the one thing that made the page look assembled from parts. */
+.bu-mono { font-family: inherit; font-size: 12px; font-variant-numeric: tabular-nums; }
 .bu-rowEnd { flex: none; display: flex; align-items: center; gap: 8px; }
 .bu-badge { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px;
   font-size: 11px; line-height: 1; white-space: nowrap; background: var(--dsw-alias-bg-layer-2);
@@ -469,13 +498,18 @@ window.__ModuleLoader__.load({
       const updatable = row.state === 'updatable'
       const gitUpdatable = row.state === 'git-updatable'
       const live = props.live === true
-      const detail = updatable
+      const versionText = updatable
         ? `${row.installedVersion} → ${row.targetVersion}`
         : gitUpdatable
           ? `${row.installedVersion} → ${row.targetVersion} · ${t('gitManualHint')}`
           : row.state === 'blocked'
             ? blockedText(row.reason, t)
             : row.installedVersion
+      const installedOn = formatDate(row.installedAt)
+      const detail =
+        installedOn === ''
+          ? versionText
+          : `${versionText} · ${fill(t('installedOn'), { date: installedOn })}`
 
       return h(
         'div',
@@ -790,13 +824,9 @@ window.__ModuleLoader__.load({
               intervalNote !== null
                 ? h('span', { className: 'bu-note', role: 'status' }, intervalNote)
                 : null,
-              h(
-                'span',
-                { className: 'bu-note' },
-                fill(data?.config?.autoApply === true ? t('autoOn') : t('autoOff'), {
-                  minutes: data?.config?.intervalMinutes ?? 0,
-                }),
-              ),
+              data?.config?.autoApply === true
+                ? h('span', { className: 'bu-note' }, t('autoOn'))
+                : null,
             )
           : null,
 
@@ -972,7 +1002,6 @@ window.__ModuleLoader__.load({
                 { className: 'bu-groupTitle' },
                 h('span', null, fill(t('gitGroup'), { count: gitRows.length })),
               ),
-              h('div', { className: 'bu-note' }, t('gitGroupNote')),
               renderRows(gitRows),
             )
           : null,
@@ -999,7 +1028,6 @@ window.__ModuleLoader__.load({
             )
           : null,
 
-        h('div', { className: 'bu-note' }, t('selfNote')),
       )
     }
 
@@ -1071,10 +1099,32 @@ window.__ModuleLoader__.load({
         if (stopped) return
         timer = setTimeout(schedule, store.nextDelay())
       }
+      /**
+       * Poll now instead of waiting out the current delay.
+       *
+       * A page that was backgrounded, or one whose last read predates an action,
+       * would otherwise keep showing a stale list; an Updates tab exists to show
+       * what just happened.
+       */
+      const pollNow = () => {
+        if (stopped) return
+        if (timer !== null) clearTimeout(timer)
+        timer = null
+        void schedule()
+      }
+      pollNowRef = pollNow
+
       ctx.effect(() => {
         void schedule()
+        // A hidden page skips its reads, so coming back must not show the list
+        // from before it was hidden.
+        const onVisible = () => {
+          if (typeof document !== 'undefined' && document.visibilityState === 'visible') pollNow()
+        }
+        if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible)
         return () => {
           stopped = true
+          if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible)
           if (timer !== null) clearTimeout(timer)
           timer = null
         }

@@ -20,6 +20,7 @@
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
+import { statSync } from 'node:fs'
 
 export const name = 'dsh-batch-updater'
 /** No hard dependency: the row stays inactive where nothing it needs exists. */
@@ -90,6 +91,38 @@ async function httpFetch(url) {
 /** Replace the reader; tests use this, the Host never calls it. */
 export function __setFetchText(next) {
   fetchText = typeof next === 'function' ? next : (url) => httpFetch(url)
+}
+
+/**
+ * The `node_modules` directory this profile installs its packages into.
+ * @returns the absolute directory, or null when the Host names no profile.
+ */
+function profileModulesDir() {
+  const profileDir = process.env.DSH_PROFILE_DIR
+  if (typeof profileDir !== 'string' || profileDir === '') return null
+  return join(profileDir, 'node_modules')
+}
+
+/**
+ * The moment a package was last installed or replaced in this profile.
+ *
+ * `pnpm` writes the package directory when it adds it, so the directory's own
+ * modification time is when this copy landed — a reinstall refreshes it while a
+ * plugin that was never touched keeps its original time. It is the closest thing
+ * to an install record the profile keeps: `pnpm` writes no per-package stamp,
+ * and the lockfile's time is the whole profile's.
+ *
+ * @param root - the profile's `node_modules` directory.
+ * @param name - the package name, scoped or not.
+ * @returns epoch milliseconds, or null when the directory cannot be read.
+ */
+function installedAtOf(root, name) {
+  if (typeof root !== 'string' || root === '' || typeof name !== 'string' || name === '') return null
+  try {
+    return Math.round(statSync(join(root, name)).mtimeMs)
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -549,10 +582,11 @@ export function apply(ctx, config) {
    * @param bundle - one entry from `listBundles()`.
    * @param installedVersion - the version in place now.
    * @param settings - the config in force.
+   * @param installedAt - when this copy landed, for the page's timestamp.
    * @returns the row the page renders.
    */
-  async function gitRow(bundle, installedVersion, settings) {
-    const base = { name: bundle.name, installedVersion, enabled: bundle.enabled === true, targetVersion: null, registry: null }
+  async function gitRow(bundle, installedVersion, settings, installedAt) {
+    const base = { name: bundle.name, installedVersion, installedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null }
     if (settings.skip.includes(bundle.name)) return { ...base, state: 'blocked', reason: 'skipped-by-config' }
     const repo = gitSourceOf(bundle.source)
     if (repo === null) return { ...base, state: 'blocked', reason: 'git-unreadable' }
@@ -590,29 +624,32 @@ export function apply(ctx, config) {
     const all = Array.isArray(bundles) ? bundles : []
     const mine = all.filter(isUserInstalled)
     const settings = cfg()
+    // One read of the profile's node_modules, shared by every row.
+    const modulesRoot = profileModulesDir()
 
     // Versions are read concurrently, but not all at once: each lookup is a
     // package-manager call, and a profile with a dozen plugins would otherwise
     // serialize a dozen round trips.
     const rows = await mapLimit(mine, 4, async (bundle) => {
       const installedVersion = typeof bundle.version === 'string' ? bundle.version : ''
+      const installedAt = installedAtOf(modulesRoot, bundle.name)
       /** @type {null | string} */
       let reason = skipReasonFor(bundle, () => settings)
-      if (reason === 'git-installed') return gitRow(bundle, installedVersion, settings)
+      if (reason === 'git-installed') return gitRow(bundle, installedVersion, settings, installedAt)
       if (reason !== null) {
-        return { name: bundle.name, installedVersion, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason }
+        return { name: bundle.name, installedVersion, installedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason }
       }
       let versions
       try {
         versions = await manager.listVersions(bundle.name)
       } catch (error) {
-        return { name: bundle.name, installedVersion, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason: `version-lookup-failed:${messageOf(error)}` }
+        return { name: bundle.name, installedVersion, installedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason: `version-lookup-failed:${messageOf(error)}` }
       }
       if (versions?.status !== 'listed') {
         // `problem` is a small code ('not-found', 'network', ...) the page can
         // translate; `reason` is a full English sentence meant for a log.
         const problem = typeof versions?.problem === 'string' ? versions.problem : 'unknown'
-        return { name: bundle.name, installedVersion, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason: problem }
+        return { name: bundle.name, installedVersion, installedAt, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason: problem }
       }
       const target = pickTarget(versions.versions, settings.includePrerelease, installedVersion)
       if (target === undefined) {
@@ -620,6 +657,7 @@ export function apply(ctx, config) {
         return {
           name: bundle.name,
           installedVersion,
+          installedAt,
           enabled: bundle.enabled === true,
           targetVersion: null,
           registry: null,
@@ -630,6 +668,7 @@ export function apply(ctx, config) {
       return {
         name: bundle.name,
         installedVersion,
+        installedAt,
         enabled: bundle.enabled === true,
         targetVersion: target.version,
         registry: typeof versions.registry === 'string' ? versions.registry : null,
@@ -706,7 +745,42 @@ export function apply(ctx, config) {
     } finally {
       activeRequestId = null
       run.current = null
+      settleRow(item, run)
     }
+  }
+
+  /**
+   * Fold a finished item into the list the page renders.
+   *
+   * Without this the row kept offering an Update button until the whole batch
+   * ended, because the page only re-read the list once. Moving the row as soon
+   * as its own install settles is what makes "Update all" visibly advance, and
+   * it is also correct for the single-row path.
+   *
+   * @param item - the entry that was installed.
+   * @param run - the batch it belongs to.
+   */
+  function settleRow(item, run) {
+    const row = state.plugins.find((entry) => entry.name === item.name)
+    if (row === undefined) return
+    const outcome = (run.results ?? []).filter((entry) => entry.name === item.name).at(-1)
+    const landed =
+      outcome !== undefined &&
+      (outcome.outcome === 'applied' || outcome.outcome === 'restart-required' || outcome.outcome === 'overridden')
+    if (landed) {
+      // The manager applied it: the installed version is the target now, and the
+      // row belongs with the plugins that are up to date.
+      row.state = 'current'
+      row.installedVersion = String(item.targetVersion)
+      row.targetVersion = null
+      row.reason = null
+      row.registry = null
+      row.installedAt = Date.now()
+      return
+    }
+    // A failure or a cancellation leaves the installed version in place, so the
+    // row keeps naming its target; the page shows why in the run results.
+    row.targetVersion = item.targetVersion
   }
 
   /**

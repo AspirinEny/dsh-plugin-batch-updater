@@ -177,6 +177,26 @@ layout, styling, or how the page actually looks.
 
 ## Changelog
 
+### 0.1.5
+
+- **Each row shows when its copy was installed**, read from the package
+  directory's own timestamp — the only per-package install record a pnpm
+  profile keeps. A reinstall refreshes it, so the date is also when it last
+  changed.
+- **"Update" now moves rows as they finish.** Each row became up to date only
+  after the entire batch ended, so a run of five looked frozen until the last
+  one settled. A row now moves to **Up to date** the moment its own install
+  returns.
+- **The page re-reads when it becomes visible again**, and an action restarts
+  the poller at the running cadence instead of leaving it on the 20-second idle
+  timer. A backgrounded tab no longer comes back showing the list from before.
+- **Removed the prose that explained the page to itself**: the "only plugins you
+  installed yourself" footnote, the "checks only, never installs" suffix, and the
+  paragraph above the Git group. The rows already say what they are.
+- **One type scale.** Version numbers were rendering in a monospace face while
+  every other row used the host's font; the page now inherits a single family at
+  13px/12px, with figures kept column-aligned via `font-variant-numeric`.
+
 ### 0.1.4
 
 - **Git-installed plugins are checked now.** The shipping manager lists no

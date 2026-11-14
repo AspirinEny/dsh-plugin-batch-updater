@@ -369,6 +369,50 @@ test('a non-forge host is reported as unsupported rather than checked', async ()
   ctx.disposeAll()
 })
 
+test('a batch moves each row to up to date as its own install settles', async () => {
+  // The page regroups from the list, so the list itself has to advance during
+  // the run; otherwise "Update all" looks frozen until the last item finishes.
+  const bundles = [mine('one', '1.0.0'), mine('two', '1.0.0'), mine('three', '1.0.0')]
+  let releaseSecond
+  const secondStarted = new Promise((resolve) => { releaseSecond = resolve })
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const { ctx } = harness(
+    bundles,
+    { one: listed([versionRecord('2.0.0')]), two: listed([versionRecord('2.0.0')]), three: listed([versionRecord('2.0.0')]) },
+    async (name) => {
+      if (name === 'two') {
+        // Park here so the test can read the list mid-batch.
+        releaseSecond()
+        await gate
+      }
+      // A real manager rewrites the installed copy, so the next listBundles()
+      // reports the new version; the fixture has to do the same or the check
+      // that follows a batch would re-report the old one.
+      const row = bundles.find((bundle) => bundle.name === name)
+      row.version = '2.0.0'
+      row.source = '2.0.0'
+      return appliedChange(name)
+    },
+  )
+  await callRoute(ctx, { action: 'refresh' })
+  const started = await callRoute(ctx, { action: 'updateAll' })
+  assert.equal(started.started, true)
+  await secondStarted
+  const mid = await callRoute(ctx, { action: 'state' })
+  const midByName = Object.fromEntries(mid.plugins.map((row) => [row.name, row]))
+  assert.equal(midByName.one.state, 'current', 'the finished one already moved')
+  assert.equal(midByName.one.installedVersion, '2.0.0')
+  assert.equal(midByName.two.state, 'updatable', 'the running one is still queued')
+  assert.equal(mid.updatable.length, 2, 'two remained after one settled')
+  release()
+  await settle(ctx, mid)
+  const after = await callRoute(ctx, { action: 'state' })
+  assert.equal(after.plugins.every((row) => row.state === 'current'), true)
+  assert.equal(after.updatable.length, 0)
+  ctx.disposeAll()
+})
+
 test('skips the plugin itself even though the user installed it', async () => {
   const bundles = [mine('dsh-batch-updater', '0.1.0'), mine('other', '1.0.0')]
   const { ctx, manager } = harness(bundles, { other: listed([versionRecord('2.0.0')]) })
