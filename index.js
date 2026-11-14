@@ -54,6 +54,104 @@ const NON_REGISTRY_SPEC = /^(?:git\+|git:|file:|link:|https?:|github:|workspace:
 const GIT_SSH_SPEC = /^[\w.-]+@[\w.-]+:/
 
 /**
+ * A Git-hosted install: the forge and repository path a saved spec names.
+ *
+ * Only a forge this can address with a plain HTTP metadata read is handled.
+ * `pnpm` saved the spec in whatever form it used, so the shorthand
+ * (`github:owner/repo`), the HTTPS URL, the `git+` prefixed URL, and the
+ * scp-like SSH address all name the same repository and are read here as one.
+ */
+const GIT_FORGE = /^(?:(github|gitlab|bitbucket|gist):([^/#]+)\/([^/#]+?)|(?:git\+)?https?:\/\/([^/#]+)\/([^/#]+)\/([^/#]+?)|git@([^/:]+):([^/#]+)\/([^/#]+?))(?:\.git)?(?:#.*)?$/i
+
+/** How long one metadata read may take before the row reports a network problem. */
+const GIT_METADATA_TIMEOUT_MS = 8_000
+
+/**
+ * The HTTP reader `readHeadVersion` uses.
+ *
+ * A module-level binding so a test can answer without a network, and so the one
+ * place that reaches out of the process is visible.
+ */
+let fetchText = (url) => httpFetch(url)
+
+/**
+ * Read one URL as text, bounded by the metadata timeout.
+ * @param url - the address to read.
+ * @returns the status and the body.
+ */
+async function httpFetch(url) {
+  const answer = await fetch(url, {
+    signal: typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(GIT_METADATA_TIMEOUT_MS) : undefined,
+    headers: { accept: 'application/json' },
+  })
+  return { status: answer.status, text: await answer.text() }
+}
+
+/** Replace the reader; tests use this, the Host never calls it. */
+export function __setFetchText(next) {
+  fetchText = typeof next === 'function' ? next : (url) => httpFetch(url)
+}
+
+/**
+ * Read the repository a saved Git spec names.
+ * @param source - the spec `listBundles()` reports as `source`.
+ * @returns the host, owner, repository, and the web URL, or null when the spec
+ *   is not a Git address this plugin can read metadata for.
+ */
+function gitSourceOf(source) {
+  if (typeof source !== 'string') return null
+  const text = source.trim()
+  // A plain version range names a registry copy; only the Git forms carry a host.
+  if (text === '' || (NON_REGISTRY_SPEC.test(text) === false && GIT_SSH_SPEC.test(text) === false)) return null
+  const match = GIT_FORGE.exec(text)
+  if (match === null) return null
+  // Three shapes, told apart by which capture group filled: the forge shorthand
+  // has no host of its own, the URL carries one, and the scp form carries one
+  // after the user name.
+  const shorthand = typeof match[1] === 'string' ? match[1].toLowerCase() : ''
+  const hosts = { github: 'github.com', gitlab: 'gitlab.com', bitbucket: 'bitbucket.org', gist: 'gist.github.com' }
+  const host = (hosts[shorthand] ?? match[4] ?? match[7] ?? '').toLowerCase()
+  const owner = match[2] ?? match[5] ?? match[8] ?? ''
+  const repo = match[3] ?? match[6] ?? match[9] ?? ''
+  if (host === '' || owner === '' || repo === '') return null
+  return { host, owner, repo, web: `https://${host}/${owner}/${repo}` }
+}
+
+/**
+ * Read the `package.json` a Git repository publishes at its default branch.
+ *
+ * The raw file is what `pnpm` would install, so its `version` is the version a
+ * reinstall would land on. Reading it needs no Git binary and no credentials for
+ * a public repository, which is the case this page can decide on its own.
+ *
+ * @param source - the repository the spec names.
+ * @param read - performs the HTTP request; injected so tests can answer.
+ * @returns the manifest version, or a small reason the read did not answer.
+ */
+async function readHeadVersion(source, read) {
+  const repo = gitSourceOf(source)
+  if (repo === null) return { kind: 'unsupported' }
+  if (repo.host !== 'github.com' && repo.host !== 'gitlab.com' && repo.host !== 'bitbucket.org') {
+    // Only these forges serve a predictable raw file for a public repository.
+    return { kind: 'unsupported', host: repo.host }
+  }
+  const path = repo.host === 'github.com'
+    ? `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/HEAD/package.json`
+    : repo.host === 'gitlab.com'
+      ? `https://gitlab.com/${repo.owner}/${repo.repo}/-/raw/HEAD/package.json`
+      : `https://bitbucket.org/${repo.owner}/${repo.repo}/raw/HEAD/package.json`
+  try {
+    const answer = await read(path)
+    if (answer.status < 200 || answer.status >= 300) return { kind: 'not-found', status: answer.status }
+    const manifest = JSON.parse(answer.text)
+    if (typeof manifest?.version !== 'string' || manifest.version.trim() === '') return { kind: 'not-found' }
+    return { kind: 'version', version: manifest.version.trim(), repo }
+  } catch (error) {
+    return { kind: 'network', message: messageOf(error), repo }
+  }
+}
+
+/**
  * Build the row's schema, or null when schemastery cannot be reached.
  * @returns the schema, or null.
  */
@@ -221,12 +319,16 @@ function skipReasonFor(bundle, cfg) {
         bundle.updatable === true && !NON_REGISTRY_SPEC.test(source) && !GIT_SSH_SPEC.test(source)
         ? 'registry'
         : undefined
-  // A Git copy updates only to another pinned commit of its own repository, which
-  // this page cannot produce, so it belongs with the non-registry installs.
+  // A Git copy is not updatable through `updateBundle` — that needs a pinned
+  // commit this page cannot produce — but a public repository's version can
+  // still be read, so it is reported separately rather than hidden as blocked.
   if (updateKind !== 'registry') {
     if (bundle.official === true) return 'official'
+    // Only a source that names a readable repository earns a version check;
+    // `link:`, `file:` and tarball installs have no upstream to ask.
+    const git = source !== '' && gitSourceOf(source) !== null
+    if (git) return 'git-installed'
     if (source !== '' && (NON_REGISTRY_SPEC.test(source) || GIT_SSH_SPEC.test(source))) return 'not-from-registry'
-    if (updateKind === 'git') return 'not-from-registry'
     return 'not-updatable'
   }
   if (bundle.official === true) return 'official'
@@ -423,6 +525,56 @@ export function apply(ctx, config) {
   }
 
   /**
+   * Compare two dotted numeric versions, the way `updateBundle` compares them.
+   * @param a - one version.
+   * @param b - the other.
+   * @returns a negative number, zero, or a positive number.
+   */
+  function compareVersions(a, b) {
+    const pa = String(a).split(/[.+-]/).slice(0, 3).map((part) => Number.parseInt(part, 10) || 0)
+    const pb = String(b).split(/[.+-]/).slice(0, 3).map((part) => Number.parseInt(part, 10) || 0)
+    for (let index = 0; index < 3; index += 1) {
+      if (pa[index] !== pb[index]) return pa[index] - pb[index]
+    }
+    return 0
+  }
+
+  /**
+   * Read a Git-installed plugin's repository version and build its row.
+   *
+   * `updateBundle` cannot replace this copy — it accepts a Git target only from a
+   * dependency pinned to a full commit — so the row never offers the batch, but
+   * it still says whether the repository moved ahead, and what to run instead.
+   *
+   * @param bundle - one entry from `listBundles()`.
+   * @param installedVersion - the version in place now.
+   * @param settings - the config in force.
+   * @returns the row the page renders.
+   */
+  async function gitRow(bundle, installedVersion, settings) {
+    const base = { name: bundle.name, installedVersion, enabled: bundle.enabled === true, targetVersion: null, registry: null }
+    if (settings.skip.includes(bundle.name)) return { ...base, state: 'blocked', reason: 'skipped-by-config' }
+    const repo = gitSourceOf(bundle.source)
+    if (repo === null) return { ...base, state: 'blocked', reason: 'git-unreadable' }
+    const head = await readHeadVersion(bundle.source, fetchText)
+    if (head.kind === 'unsupported') return { ...base, state: 'blocked', reason: 'git-unsupported-host', detail: repo.web }
+    if (head.kind === 'not-found') return { ...base, state: 'blocked', reason: 'git-not-found', detail: repo.web }
+    if (head.kind === 'network') return { ...base, state: 'blocked', reason: 'network', detail: repo.web }
+    if (head.kind !== 'version') return { ...base, state: 'blocked', reason: 'git-unreadable', detail: repo.web }
+    const newer = compareVersions(head.version, installedVersion) > 0
+    return {
+      ...base,
+      state: newer ? 'git-updatable' : 'current',
+      reason: newer ? 'git-updatable' : null,
+      // The page cannot install this one, so it shows the version and the
+      // repository instead of an Update button.
+      targetVersion: newer ? head.version : null,
+      detail: repo.web,
+      spec: typeof bundle.source === 'string' ? bundle.source : null,
+    }
+  }
+
+  /**
    * Read the user's own bundles and work out which ones can move.
    *
    * Every user-installed bundle gets a row, whether or not it can move: a page
@@ -446,6 +598,7 @@ export function apply(ctx, config) {
       const installedVersion = typeof bundle.version === 'string' ? bundle.version : ''
       /** @type {null | string} */
       let reason = skipReasonFor(bundle, () => settings)
+      if (reason === 'git-installed') return gitRow(bundle, installedVersion, settings)
       if (reason !== null) {
         return { name: bundle.name, installedVersion, enabled: bundle.enabled === true, targetVersion: null, registry: null, state: 'blocked', reason }
       }
@@ -717,6 +870,11 @@ export function apply(ctx, config) {
       checked: state.checked,
       plugins: state.plugins,
       updatable,
+      // Git installs whose repository moved ahead. They are reported, not
+      // queued: `updateBundle` needs a dependency pinned to a full commit.
+      gitUpdatable: state.plugins
+        .filter((row) => row.state === 'git-updatable')
+        .map((row) => ({ name: row.name, from: row.installedVersion, to: row.targetVersion, repo: row.detail ?? null, spec: row.spec ?? null })),
       blocked: state.plugins
         .filter((row) => row.state === 'blocked')
         .map((row) => ({ name: row.name, reason: row.reason })),

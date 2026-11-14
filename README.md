@@ -45,11 +45,37 @@ the reason, rather than hidden:
 | Skipped | Why |
 |---|---|
 | This plugin itself | Replacing a running plugin from inside itself is not safe. |
-| Git, tarball, `link:` and `file:` installs | `updateBundle` needs a registry range to resolve a newer version from. |
+| Tarball, `link:` and `file:` installs | `updateBundle` needs a registry range or a pinned commit to resolve a newer version from. |
 | Versions that need a newer DSH | Installing them would break the profile. |
 | Deprecated versions, and targets that declare no bundle | Neither is a usable upgrade. |
 | Prereleases | Unless `includePrerelease` is on. |
 | Names listed in `skip` | Explicit opt-out. |
+
+### Plugins installed from Git
+
+The shipping manager never lists versions for a Git-installed bundle: it offers
+an update only when the profile's dependency is pinned to a full 40-character
+commit, and it takes the target commit from the caller. So a plugin installed as
+`github:owner/repo` — the form **Add plugin** saves when you paste a repository
+address — cannot be updated by the built-in updater at all, and no amount of
+refreshing changes that.
+
+This plugin reads the repository instead. For a **Git install** it fetches
+`package.json` from the default branch of the forge the spec names (GitHub,
+GitLab and Bitbucket), and compares its `version` with the installed one:
+
+- **The repository moved ahead** — the row appears under **Installed from Git**
+  with the newer version, and one button copies the reinstall command:
+  `dsh plugin --profile <name> add <spec>`.
+- **It matches** — the row is up to date, like a registry plugin.
+
+These rows are never queued by **Update** or by `autoApply`: replacing the copy
+means repointing the profile's dependency, which is a profile edit rather than
+an update, and the manager refuses to do it while the bundle is running. The
+command is the whole remedy.
+
+A repository this cannot read (private, another host, no `package.json`) is
+shown as blocked with that reason instead of pretending it is up to date.
 
 ## Settings
 
@@ -84,9 +110,11 @@ The Host half (`index.js`) is a Cordis plugin with two passes over
 `ctx.pluginManager`:
 
 ```
-check:  listBundles()  ->  the bundles with availability 'profile', not
-                           official, and update 'registry'
-                       ->  listVersions(name) for each
+check:  listBundles()  ->  the bundles with availability 'profile' and not
+                           official
+                       ->  update 'registry': listVersions(name)
+                       ->  a Git spec: read the repository's package.json
+                       ->  anything else: reported, not checked
                        ->  the newest version that declares a bundle, is not
                            deprecated, accepts this DSH, and is not a prerelease
 apply:  updateBundle(name, version) for the ticked rows, strictly in order
@@ -148,6 +176,22 @@ layout, styling, or how the page actually looks.
   then update again.
 
 ## Changelog
+
+### 0.1.4
+
+- **Git-installed plugins are checked now.** The shipping manager lists no
+  versions for a bundle installed as `github:owner/repo`, so refreshing the
+  built-in page never showed an update for one. This page reads
+  `package.json` from the repository's default branch on GitHub, GitLab or
+  Bitbucket and compares it with the installed version.
+- A Git install that moved ahead appears under **Installed from Git** with the
+  newer version and a button that copies `dsh plugin --profile <name> add <spec>`.
+  It is never queued by **Update** or `autoApply`, because replacing the copy
+  means repointing the profile's dependency.
+- A Git repository that cannot be read (private, another host, no
+  `package.json`) is reported with that reason rather than shown as up to date.
+- The metadata read is injectable, so the tests cover every Git path without
+  touching the network.
 
 ### 0.1.3
 

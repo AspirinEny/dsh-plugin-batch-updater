@@ -8,7 +8,15 @@
  * failure does not stop the queue, and that a ticked selection is honoured.
  */
 import assert from 'node:assert/strict'
-import { apply } from '../index.js'
+import { apply, __setFetchText } from '../index.js'
+
+// The plugin reads a Git repository's `package.json` over HTTP. Tests answer
+// from this table instead, so a fixture never reaches the network.
+const gitAnswers = new Map()
+__setFetchText(async (url) => {
+  const answer = gitAnswers.get(url)
+  return answer ?? { status: 404, text: '' }
+})
 
 /**
  * Build a fake Cordis context that records what the plugin registered.
@@ -123,6 +131,15 @@ function mineGit(name, version, extra = {}) {
   return mine(name, version, { update: 'git', source: 'github:me/repo#abc1234', ...extra })
 }
 
+/** Answer the repository metadata read for one repo, as GitHub's raw host would. */
+function stubRepo(ownerRepo, version) {
+  const [owner, repo] = ownerRepo.split('/')
+  gitAnswers.set(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/package.json`, {
+    status: 200,
+    text: JSON.stringify({ name: repo, version }),
+  })
+}
+
 /** A bundle the dsh installation ships. */
 function shipped(name, version) {
   return {
@@ -201,7 +218,8 @@ async function settle(ctx, state, limit = 200) {
 }
 
 const tests = []
-const test = (name, fn) => tests.push({ name, fn })
+/** Wrap a test so every case starts with an empty repository table. */
+const test = (name, fn) => tests.push({ name, fn: async () => { gitAnswers.clear(); return fn() } })
 
 test('counts and lists only the plugins the user installed', async () => {
   const bundles = [
@@ -252,12 +270,14 @@ test('marks official and non-registry installs as blocked with a reason', async 
   const { ctx } = harness(bundles, { ok: listed([versionRecord('2.0.0')]) })
   const state = await callRoute(ctx, { action: 'refresh' })
   const byName = Object.fromEntries(state.plugins.map((row) => [row.name, row]))
+  // A Git copy is checked against its repository instead. This one answers 404,
+  // which is the `git-not-found` row, not the blanket non-registry reason.
   assert.equal(byName['from-git'].state, 'blocked')
-  assert.equal(byName['from-git'].reason, 'not-from-registry')
+  assert.equal(byName['from-git'].reason, 'git-not-found')
   assert.equal(byName['from-path'].state, 'blocked')
   assert.equal(byName['from-path'].reason, 'not-from-registry')
-  assert.equal(byName['from-ssh'].state, 'blocked', 'an scp-like Git address is not a registry range')
-  assert.equal(byName['from-ssh'].reason, 'not-from-registry')
+  assert.equal(byName['from-ssh'].state, 'blocked', 'an scp-like Git address is checked as a repository')
+  assert.equal(byName['from-ssh'].reason, 'git-not-found')
   ctx.disposeAll()
 })
 
@@ -291,9 +311,61 @@ test('still reads the retired updatable boolean', async () => {
   assert.equal(byName.a.state, 'updatable', 'an older installation still lists updatable: true')
   assert.equal(byName.a.targetVersion, '2.0.0')
   assert.equal(byName.b.state, 'blocked', 'the retired boolean was true for Git copies too')
-  assert.equal(byName.b.reason, 'not-from-registry')
-  assert.equal(byName.c.state, 'blocked', 'an scp-like Git address is not a registry range')
-  assert.equal(byName.c.reason, 'not-from-registry')
+  assert.equal(byName.b.reason, 'git-not-found')
+  assert.equal(byName.c.state, 'blocked', 'an scp-like Git address is checked as a repository')
+  assert.equal(byName.c.reason, 'git-not-found')
+  ctx.disposeAll()
+})
+
+test('reports a Git install whose repository moved ahead, without offering the batch', async () => {
+  // A Git copy cannot go through updateBundle — that needs a dependency pinned
+  // to a full commit — so the page reports the newer version and stays out of it.
+  const bundles = [mineGit('from-git', '1.0.0'), mine('reg', '1.0.0')]
+  stubRepo('me/repo', '1.2.0')
+  const { ctx, manager } = harness(bundles, { reg: listed([versionRecord('2.0.0')]) })
+  const state = await callRoute(ctx, { action: 'refresh' })
+  const byName = Object.fromEntries(state.plugins.map((row) => [row.name, row]))
+  assert.equal(byName['from-git'].state, 'git-updatable')
+  assert.equal(byName['from-git'].targetVersion, '1.2.0')
+  assert.equal(state.gitUpdatable.length, 1)
+  assert.equal(state.gitUpdatable[0].name, 'from-git')
+  // The batch must never include it: updateBundle would refuse the target.
+  assert.equal(state.updatable.length, 1)
+  assert.equal(state.updatable[0].name, 'reg')
+  assert.equal(manager.calls.listVersions.includes('from-git'), false)
+  ctx.disposeAll()
+})
+
+test('a Git install at the repository version is up to date', async () => {
+  const bundles = [mineGit('from-git', '1.0.0')]
+  stubRepo('me/repo', '1.0.0')
+  const { ctx } = harness(bundles, {})
+  const state = await callRoute(ctx, { action: 'refresh' })
+  const row = state.plugins.find((item) => item.name === 'from-git')
+  assert.equal(row.state, 'current')
+  assert.equal(row.targetVersion, null)
+  assert.equal(state.gitUpdatable.length, 0)
+  ctx.disposeAll()
+})
+
+test('a Git repository that cannot be read is blocked, not silently up to date', async () => {
+  const bundles = [mineGit('from-git', '1.0.0')]
+  // No stub: the reader answers 404, as a private or missing repository would.
+  const { ctx } = harness(bundles, {})
+  const state = await callRoute(ctx, { action: 'refresh' })
+  const row = state.plugins.find((item) => item.name === 'from-git')
+  assert.equal(row.state, 'blocked')
+  assert.equal(row.reason, 'git-not-found')
+  ctx.disposeAll()
+})
+
+test('a non-forge host is reported as unsupported rather than checked', async () => {
+  const bundles = [mineGit('from-self', '1.0.0', { source: 'https://git.example.com/me/repo' })]
+  const { ctx } = harness(bundles, {})
+  const state = await callRoute(ctx, { action: 'refresh' })
+  const row = state.plugins.find((item) => item.name === 'from-self')
+  assert.equal(row.state, 'blocked')
+  assert.equal(row.reason, 'git-unsupported-host')
   ctx.disposeAll()
 })
 

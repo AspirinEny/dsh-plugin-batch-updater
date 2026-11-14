@@ -37,6 +37,14 @@ window.__ModuleLoader__.load({
       "updatableGroup": "可更新 {count}",
       "currentGroup": "已是最新 {count}",
       "blockedCount": "无法自动更新 {count}",
+      "gitGroup": "从 Git 安装，有新版本 {count}",
+      "gitGroupNote": "这些插件从 Git 仓库安装，内置管理器不会为它们查询版本。下面是仓库里的最新版本；点右侧按钮复制重装命令。",
+      "gitManualHint": "需重装",
+      "gitCopyCommand": "复制命令",
+      "gitCopied": "已复制",
+      "gitCopyTip": "复制：dsh plugin --profile desktop add {spec}",
+      "gitUnreadable": "读不到这个仓库的版本信息",
+      "gitUnsupportedHost": "只支持 GitHub / GitLab / Bitbucket 仓库",
       "selectAll": "全选可更新的插件",
       "selectRow": "选择 {name}",
       "intervalLabel": "检查间隔（分钟）",
@@ -101,6 +109,14 @@ window.__ModuleLoader__.load({
       "updatableGroup": "Can update {count}",
       "currentGroup": "Up to date {count}",
       "blockedCount": "Cannot update automatically {count}",
+      "gitGroup": "Installed from Git, newer version {count}",
+      "gitGroupNote": "These were installed from a Git repository, which the built-in manager does not query for versions. The newest version in the repository is below; copy the reinstall command with the button on the right.",
+      "gitManualHint": "reinstall to update",
+      "gitCopyCommand": "Copy command",
+      "gitCopied": "Copied",
+      "gitCopyTip": "Copy: dsh plugin --profile desktop add {spec}",
+      "gitUnreadable": "Could not read this repository's version",
+      "gitUnsupportedHost": "Only GitHub / GitLab / Bitbucket repositories are supported",
       "selectAll": "Select every updatable plugin",
       "selectRow": "Select {name}",
       "intervalLabel": "Check every (minutes)",
@@ -416,6 +432,9 @@ window.__ModuleLoader__.load({
       if (reason === 'prerelease-only') return t('reasonPrerelease')
       if (reason === 'deprecated-only') return t('reasonDeprecated')
       if (reason === 'target-is-not-a-bundle') return t('reasonNotBundle')
+      if (reason === 'git-unreadable') return t('gitUnreadable')
+      if (reason === 'git-unsupported-host') return t('gitUnsupportedHost')
+      if (reason === 'git-not-found') return t('reasonNotFound')
       if (reason === 'not-found') return t('reasonNotFound')
       if (reason === 'network') return t('reasonNetwork')
       if (reason === 'unknown') return t('reasonLookupFailed')
@@ -448,12 +467,15 @@ window.__ModuleLoader__.load({
     function PluginRow(props) {
       const { row, t, openPackage } = props
       const updatable = row.state === 'updatable'
+      const gitUpdatable = row.state === 'git-updatable'
       const live = props.live === true
       const detail = updatable
         ? `${row.installedVersion} → ${row.targetVersion}`
-        : row.state === 'blocked'
-          ? blockedText(row.reason, t)
-          : row.installedVersion
+        : gitUpdatable
+          ? `${row.installedVersion} → ${row.targetVersion} · ${t('gitManualHint')}`
+          : row.state === 'blocked'
+            ? blockedText(row.reason, t)
+            : row.installedVersion
 
       return h(
         'div',
@@ -497,7 +519,20 @@ window.__ModuleLoader__.load({
                   },
                   t('updateThis'),
                 )
-              : null,
+              : gitUpdatable
+                // The batch cannot install this one: the dependency has to be
+                // repointed at a commit, which is a profile edit, not an update.
+                ? h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'bu-btn',
+                      title: fill(t('gitCopyTip'), { spec: String(row.spec ?? '') }),
+                      onClick: () => props.onCopySpec(row),
+                    },
+                    props.copied === true ? t('gitCopied') : t('gitCopyCommand'),
+                  )
+                : null,
           row.enabled === false ? h('span', { className: 'bu-badge' }, t('disabledTag')) : null,
         ),
       )
@@ -519,6 +554,9 @@ window.__ModuleLoader__.load({
       const [intervalDraft, setIntervalDraft] = React.useState(null)
       const [intervalError, setIntervalError] = React.useState(null)
       const [intervalNote, setIntervalNote] = React.useState(null)
+      // The package whose reinstall command was just copied, so one button can
+      // say so; it clears itself after a moment.
+      const [copiedSpec, setCopiedSpec] = React.useState(null)
 
       React.useEffect(() => {
         store.refresh()
@@ -543,6 +581,7 @@ window.__ModuleLoader__.load({
       const updatableNames = plugins.filter((row) => row.state === 'updatable').map((row) => row.name)
       const blockedRows = plugins.filter((row) => row.state === 'blocked')
       const currentRows = plugins.filter((row) => row.state === 'current')
+      const gitRows = plugins.filter((row) => row.state === 'git-updatable')
 
       // Selection defaults to "everything that can move", derived rather than
       // set by an effect: a check that finds new work should not leave the
@@ -577,6 +616,28 @@ window.__ModuleLoader__.load({
 
       const toggleAll = (next) => {
         setSelected({ deselected: next ? [] : [...updatableNames] })
+      }
+
+      /**
+       * Put a Git plugin's reinstall command on the clipboard.
+       *
+       * A Git-installed bundle updates only by repointing its dependency, which
+       * the manager refuses to do from inside itself, so the page hands over the
+       * exact command instead of pretending an Update button would work.
+       * @param row - the git row.
+       */
+      const copySpec = async (row) => {
+        const spec = String(row?.spec ?? '')
+        if (spec === '') return
+        const command = `dsh plugin --profile desktop add ${spec}`
+        try {
+          await navigator.clipboard.writeText(command)
+          setCopiedSpec(row.name)
+          setTimeout(() => setCopiedSpec(null), 2000)
+        } catch {
+          // A browser that refuses clipboard access still shows the spec in the
+          // row's tooltip, so there is nothing to report here.
+        }
       }
 
       const runFailures = Array.isArray(run?.results) ? run.results.filter((row) => row.outcome === 'failed') : []
@@ -620,7 +681,9 @@ window.__ModuleLoader__.load({
               running,
               selected: activeSelection.includes(row.name),
               live: run !== null && run.current !== null && run.current !== undefined && run.current.name === row.name,
+              copied: copiedSpec === row.name,
               onSelect: toggleOne,
+              onCopySpec: copySpec,
               onUpdateOne: (item) => act('updateOne', { name: item.name, version: item.targetVersion }),
             }),
           ),
@@ -895,6 +958,22 @@ window.__ModuleLoader__.load({
                             : t('allUpToDate'),
                     ),
                   ),
+            )
+          : null,
+
+        // Git installs that moved ahead. The batch cannot touch them, so they
+        // get their own group with the exact reinstall command.
+        available && gitRows.length > 0
+          ? h(
+              'div',
+              { className: 'bu-group' },
+              h(
+                'div',
+                { className: 'bu-groupTitle' },
+                h('span', null, fill(t('gitGroup'), { count: gitRows.length })),
+              ),
+              h('div', { className: 'bu-note' }, t('gitGroupNote')),
+              renderRows(gitRows),
             )
           : null,
 
